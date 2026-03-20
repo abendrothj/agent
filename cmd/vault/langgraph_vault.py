@@ -17,17 +17,28 @@ from internal.core.risk.classifier import RiskClassifier, Tier
 from internal.memory.ledger.store import LedgerStore
 from internal.memory.context.manager import ContextManager
 from internal.memory.graph.client import GraphRAGClient
+from internal.mcp.client import MCPContextProvider
 
 try:
     from langgraph.graph import StateGraph, END
     from langgraph.graph.message import add_messages
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     from langgraph.types import interrupt, Command
+    _LANGGRAPH_OK = True
+except ImportError:
+    # Node functions are importable and testable without LangGraph.
+    # Only build_vault_graph() and LangGraphVault require it at runtime.
+    StateGraph = None  # type: ignore[assignment,misc]
+    END = None         # type: ignore[assignment]
+    AsyncPostgresSaver = None  # type: ignore[assignment,misc]
+    interrupt = None   # type: ignore[assignment]
+    Command = None     # type: ignore[assignment,misc]
+    _LANGGRAPH_OK = False
+
+try:
     from typing_extensions import TypedDict
 except ImportError:
-    raise RuntimeError(
-        "LangGraph not installed. Run: pip install langgraph langgraph-checkpoint-postgres"
-    )
+    from typing import TypedDict  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +65,12 @@ class VaultState(TypedDict):
     # Node checkpoints (append-only for audit trail)
     checkpoints: Annotated[List[str], operator.add]
 
+    # Peripheral sensory context (MCP — thalamo-cortical pathway)
+    # Filled by node_sense_context before classification fires.
+    # Analogy: the primary sensory cortex receives filtered input from the
+    # thalamus; here that signal enriches the risk classifier's world-model.
+    mcp_context: Optional[str]
+
     # Intermediate flags
     rejection_cache_hit: bool
     rate_limit_exceeded: bool
@@ -68,13 +85,47 @@ class VaultState(TypedDict):
 # Node implementations
 # ---------------------------------------------------------------------------
 
+async def node_sense_context(state: VaultState, config: dict) -> dict:
+    """
+    Primary sensory cortex — first cortical processing of peripheral input.
+
+    Biology mapping:
+      MCP servers          = sensory receptors (git=proprioception, files=tactile)
+      MCPContextProvider   = thalamus  (routes + gates the signal)
+      This node             = primary sensory cortex (first cortical layer)
+      node_classify        = association cortex (multi-modal integration)
+
+    Runs unconditionally before classify. If the provider is absent or the
+    sensory signal doesn't arrive within the thalamic window (2 s), the
+    agent proceeds with mcp_context=None — degraded senses, not paralysis.
+    """
+    mcp_provider: Optional[MCPContextProvider] = config["configurable"].get("mcp_provider")
+    if mcp_provider is None:
+        return {"mcp_context": None, "checkpoints": ["sense_context:disabled"]}
+
+    ctx = await mcp_provider.gather(state["prompt"])
+    label = "sense_context:ok" if ctx else "sense_context:empty"
+    logger.info("[sense_context] %s  chars=%s", label, len(ctx) if ctx else 0)
+    return {"mcp_context": ctx, "checkpoints": [label]}
+
+
 def node_classify(state: VaultState, config: dict) -> dict:
-    """Classify the request into risk Tier 1-4 using RiskClassifier"""
+    """Classify the request into risk Tier 1-4 using RiskClassifier.
+
+    If MCP sensory context was gathered in node_sense_context, it is prepended
+    to system_context before the classifier sees it — giving the classifier the
+    same multi-modal awareness a human expert would have when reading a PR.
+    """
     classifier: RiskClassifier = config["configurable"]["classifier"]
+
+    # Enrich system_context with peripheral sensory signal (thalamo-cortical)
+    base_ctx = state.get("system_context", "")
+    mcp_ctx  = state.get("mcp_context") or ""
+    enriched_ctx = (mcp_ctx + "\n\n" + base_ctx).strip() if mcp_ctx else base_ctx
 
     tier = classifier.classify(
         state["prompt"],
-        state.get("system_context", ""),
+        enriched_ctx,
         state.get("scope", "local"),
     )
     logger.info(f"[classify] {state['request_id']} → Tier {tier}")
@@ -323,8 +374,8 @@ def build_vault_graph(checkpointer) -> Any:
     """
     Compile the Vault decision graph.
 
-    Node layout:
-        classify
+    Node layout (PNS = peripheral nervous system via MCP):
+        sense_context → classify
           ├─ tier=1 ─────────────────────────────────────── approve
           ├─ tier=4 ─── check_rejection_cache
           │                ├─ cache_hit ─────────────────── reject
@@ -343,8 +394,13 @@ def build_vault_graph(checkpointer) -> Any:
                                                                                                   ├─ approved ── approve
                                                                                                   └─ denied ──── reject
     """
+    if not _LANGGRAPH_OK:
+        raise RuntimeError(
+            "LangGraph not installed. Run: pip install langgraph langgraph-checkpoint-postgres"
+        )
     g = StateGraph(VaultState)
 
+    g.add_node("sense_context", node_sense_context)
     g.add_node("classify", node_classify)
     g.add_node("check_rejection_cache", node_check_rejection_cache)
     g.add_node("check_rate_limit", node_check_rate_limit)
@@ -355,7 +411,10 @@ def build_vault_graph(checkpointer) -> Any:
     g.add_node("approve", node_approve)
     g.add_node("reject", node_reject)
 
-    g.set_entry_point("classify")
+    # sense_context is the new entry point — the peripheral nervous system
+    # feeds the thalamus before prefrontal cortex fires
+    g.set_entry_point("sense_context")
+    g.add_edge("sense_context", "classify")
 
     g.add_conditional_edges("classify", route_after_classify)
     g.add_conditional_edges("check_rejection_cache", route_after_rejection_cache)
@@ -392,16 +451,27 @@ class LangGraphVault:
         f"{os.getenv('VAULT_DB_NAME', 'agent_memory')}"
     )
 
-    def __init__(self, ledger: LedgerStore, context: ContextManager, graph_client: GraphRAGClient):
+    def __init__(
+        self,
+        ledger: LedgerStore,
+        context: ContextManager,
+        graph_client: GraphRAGClient,
+        mcp_provider: Optional["MCPContextProvider"] = None,
+    ):
         self.ledger = ledger
         self.context = context
         self.graph_client = graph_client
+        self.mcp_provider = mcp_provider
         self.classifier = RiskClassifier()
         self._graph = None
         self._checkpointer = None
 
     async def initialize(self):
         """Set up PostgreSQL-backed checkpointer and compile graph"""
+        if not _LANGGRAPH_OK:
+            raise RuntimeError(
+                "LangGraph not installed. Run: pip install langgraph langgraph-checkpoint-postgres"
+            )
         self._checkpointer = AsyncPostgresSaver.from_conn_string(self.DB_DSN)
         await self._checkpointer.setup()
         self._graph = build_vault_graph(self._checkpointer)
@@ -434,6 +504,7 @@ class LangGraphVault:
                 "ledger": self.ledger,
                 "context": self.context,
                 "graph_client": self.graph_client,
+                "mcp_provider": self.mcp_provider,  # Thalamus — None = senses disabled
             }
         }
 
@@ -448,6 +519,7 @@ class LangGraphVault:
             "approved": None,
             "reason": "",
             "checkpoints": [],
+            "mcp_context": None,
             "rejection_cache_hit": False,
             "rate_limit_exceeded": False,
             "graph_memory_warning": None,
@@ -485,6 +557,7 @@ class LangGraphVault:
                 "ledger": self.ledger,
                 "context": self.context,
                 "graph_client": self.graph_client,
+                "mcp_provider": self.mcp_provider,
             }
         }
 

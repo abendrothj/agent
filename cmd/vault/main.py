@@ -17,6 +17,7 @@ from internal.core.risk.classifier import RiskClassifier, Tier
 from internal.memory.ledger.store import LedgerStore
 from internal.memory.context.manager import ContextManager
 from internal.memory.graph.client import GraphRAGClient
+from internal.mcp.client import MCPContextProvider
 from cmd.vault.langgraph_vault import LangGraphVault
 
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +51,7 @@ class VaultService:
         self.ledger: Optional[LedgerStore] = None
         self.context: Optional[ContextManager] = None
         self.graph_client: Optional[GraphRAGClient] = None
+        self._mcp_provider: Optional[MCPContextProvider] = None
         self._lg_vault: Optional[LangGraphVault] = None
 
     async def initialize(self):
@@ -75,11 +77,24 @@ class VaultService:
         self.graph_client = GraphRAGClient()
         await self.graph_client.initialize()
 
+        # MCP context provider — the Thalamus (peripheral sensory routing)
+        # Feeds git state + relevant file context into node_sense_context before
+        # the risk classifier fires.  Disabled = senses offline, agent still works.
+        mcp_enabled = os.getenv("MCP_ENABLED", "true").lower() == "true"
+        workspace   = os.getenv("MCP_WORKSPACE_PATH", "/app")
+        self._mcp_provider = MCPContextProvider(
+            workspace_path=workspace,
+            enabled=mcp_enabled,
+            timeout_seconds=float(os.getenv("MCP_TIMEOUT_SECONDS", "2.0")),
+        )
+        await self._mcp_provider.initialize()
+
         # LangGraph vault — wires together all dependencies
         self._lg_vault = LangGraphVault(
             ledger=self.ledger,
             context=self.context,
             graph_client=self.graph_client,
+            mcp_provider=self._mcp_provider,
         )
         await self._lg_vault.initialize()
 

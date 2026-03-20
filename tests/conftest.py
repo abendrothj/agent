@@ -73,11 +73,34 @@ def mock_graph_client():
     gc = AsyncMock()
     gc.initialize = AsyncMock()
     gc.index_document = AsyncMock()
-    gc.find_failure_patterns = AsyncMock(return_value=[])
-    gc.check_baseline_eligibility = AsyncMock(return_value=(True, "OK", 0.91))
+    # Returns Optional[str] — None means no failure patterns found
+    gc.find_failure_patterns = AsyncMock(return_value=None)
+    # Returns bool — True means baseline exists and agent is eligible
+    gc.check_baseline_eligibility = AsyncMock(return_value=True)
     gc.global_summary = AsyncMock(return_value="No failures recorded.")
     gc.record_relationship = AsyncMock()
+    gc.record_pr_submitted = AsyncMock()
+    gc.record_pr_outcome = AsyncMock()
+    gc.get_open_prs = AsyncMock(return_value=[])
     return gc
+
+
+@pytest.fixture
+def mock_mcp_provider():
+    """MCPContextProvider stub — returns a canned sensory context string."""
+    provider = AsyncMock()
+    provider.initialize = AsyncMock()
+    provider.gather = AsyncMock(return_value="<mcp:git>\nBranch: main\n</mcp:git>")
+    return provider
+
+
+@pytest.fixture
+def mock_mcp_provider_empty():
+    """MCPContextProvider stub that returns no context (quiet senses)."""
+    provider = AsyncMock()
+    provider.initialize = AsyncMock()
+    provider.gather = AsyncMock(return_value=None)
+    return provider
 
 
 # ── Sample request data ───────────────────────────────────────────────────────

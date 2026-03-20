@@ -67,7 +67,8 @@ class TestViolationThrottle:
     def test_service_restricted_after_100_violations(self):
         v = SafetyValidator()
         v.violation_count = 101          # simulate accumulated violations
-        ok, reason = v.validate_prompt("rm -rf /", tier=1)
+        # Use a benign prompt so it doesn't hit the blocked-pattern check first
+        ok, reason = v.validate_prompt("show me the logs", tier=1)
         assert ok is False
         assert "too many violations" in reason.lower()
 

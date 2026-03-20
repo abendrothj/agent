@@ -18,3 +18,11 @@ neo4j>=5.0.0
 # Git autonomy — autonomous repo discovery, contribution, PR submission
 gitpython>=3.1.40
 httpx>=0.27.0
+
+# MCP — Model Context Protocol (peripheral nervous system / sensory organs)
+# Provides: structured sensory input to LangGraph before risk classification.
+# mcp         = the protocol SDK (client + server framework)
+# mcp-server-git = Python git server: git_log, git_diff, git_status tools
+# Both are free. No API cost — all transport is local stdio.
+mcp>=1.0.0
+mcp-server-git>=0.1.0
