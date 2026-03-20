@@ -1,0 +1,80 @@
+name: Muscle Manual CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to deploy (branch, tag, or commit SHA)"
+        required: true
+        default: "main"
+      allow_dirty:
+        description: "Allow deployment when runner working tree is dirty"
+        type: boolean
+        required: true
+        default: false
+      deploy_source:
+        description: "Deployment source"
+        type: choice
+        options:
+          - local-build
+          - ghcr
+        required: true
+        default: ghcr
+      image_tag:
+        description: "GHCR image tag (used when deploy_source=ghcr)"
+        required: true
+        default: latest
+
+concurrency:
+  group: muscle-manual-cd
+  cancel-in-progress: false
+
+env:
+  MUSCLE_IMAGE_REPO: ghcr.io/abendrothj/agent-muscle
+
+jobs:
+  deploy-muscle:
+    name: Deploy Muscle on Win11
+    runs-on:
+      - self-hosted
+      - windows
+      - muscle
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run deployment script
+        shell: powershell
+        run: |
+          $allowDirty = "${{ inputs.allow_dirty }}" -eq "true"
+          $deploySource = "${{ inputs.deploy_source }}"
+          $muscleImage = ""
+          if ($deploySource -eq "ghcr") {
+            $muscleImage = "${{ env.MUSCLE_IMAGE_REPO }}:${{ inputs.image_tag }}"
+          }
+
+          $args = @(
+            "-ExecutionPolicy", "Bypass",
+            "-File", "deployments/win11/power/deploy_muscle_update.ps1",
+            "-RepoPath", "$env:GITHUB_WORKSPACE",
+            "-Ref", "${{ inputs.ref }}"
+          )
+
+          if ($muscleImage) {
+            $args += @("-MuscleImage", $muscleImage)
+          }
+
+          if ($allowDirty) {
+            $args += "-AllowDirty"
+          }
+          & powershell @args
+
+      - name: Show deployed revision
+        shell: powershell
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          git rev-parse HEAD
+          git log -1 --pretty=oneline

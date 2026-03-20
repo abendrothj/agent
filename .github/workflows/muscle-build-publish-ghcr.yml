@@ -1,0 +1,59 @@
+name: Muscle Build and Publish GHCR
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - cmd/muscle/**
+      - internal/api/muscle.proto
+      - deployments/win11/docker-compose.yml
+      - .github/workflows/muscle-build-publish-ghcr.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  MUSCLE_IMAGE_REPO: ghcr.io/abendrothj/agent-muscle
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.MUSCLE_IMAGE_REPO }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cmd/muscle/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

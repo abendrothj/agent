@@ -13,9 +13,7 @@
 
 services:
   muscle:
-    build:
-      context: ../..
-      dockerfile: cmd/muscle/Dockerfile
+    image: ${MUSCLE_IMAGE:-win11-muscle:latest}
     container_name: win11_muscle
     environment:
       # ── Vault connection ──────────────────────────────────────────
