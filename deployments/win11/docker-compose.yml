@@ -1,0 +1,71 @@
+# Win11 deployment — Muscle (HuggingFace inference) only.
+#
+# Prerequisites:
+#   - NVIDIA drivers + CUDA 12.x installed
+#   - Docker Desktop with WSL2 backend and NVIDIA Container Toolkit enabled
+#   - Certificates installed to ./certs/ (see WIN11_SETUP.md)
+#   - Run scripts/gen_protos.sh first (or copy pre-generated pb2 files)
+#
+# Start (from repo root on Win11):
+#   cp deployments/win11/.env.example deployments/win11/.env
+#   # Edit .env: set VAULT_API_URL to your Pi's LAN IP
+#   docker compose --env-file deployments/win11/.env -f deployments/win11/docker-compose.yml up -d
+
+version: '3.8'
+
+services:
+  muscle:
+    build:
+      context: ../..
+      dockerfile: cmd/muscle/Dockerfile
+    container_name: win11_muscle
+    environment:
+      # ── Vault connection ──────────────────────────────────────────
+      # Set this to your Pi's LAN IP:port
+      VAULT_API_URL: ${VAULT_API_URL:-192.168.1.XXX:50051}
+
+      # ── mTLS (Win11 side) ─────────────────────────────────────────
+      # muscle.crt / muscle.key  = Win11's own identity certificate
+      # client.crt               = Pi's certificate — used as trust anchor
+      # Install these to ./certs/ per WIN11_SETUP.md
+      CERT_FILE: /run/certs/muscle.crt
+      KEY_FILE: /run/certs/muscle.key
+      CA_CERT: /run/certs/client.crt
+
+      # ── HuggingFace inference ─────────────────────────────────────
+      HF_MODEL_ID: ${HF_MODEL_ID:-Qwen/Qwen2.5-Coder-7B-Instruct}
+      HF_DEVICE: cuda
+      HF_DTYPE: float16
+      HF_QUANTIZE: ${HF_QUANTIZE:-none}
+      HF_MAX_TOKENS: ${HF_MAX_TOKENS:-1024}
+      HF_TEMPERATURE: ${HF_TEMPERATURE:-0.7}
+
+      # ── gRPC server (accepts connections from Pi) ─────────────────
+      GRPC_HOST: 0.0.0.0
+      GRPC_PORT: 50051
+
+      # ── Activity gating ──────────────────────────────────────────
+      ACTIVITY_MONITORING_ENABLED: "true"
+      GPU_THRESHOLD_PERCENT: "30.0"
+      IDLE_THRESHOLD_SEC: "300"
+
+      LOG_LEVEL: INFO
+    ports:
+      - "50051:50051"     # Pi Vault connects here
+    volumes:
+      # HuggingFace model cache (avoids re-download on restart)
+      - hf_model_cache:/root/.cache/huggingface
+      # Certificates — place muscle.crt, muscle.key, client.crt here
+      - ./certs:/run/certs:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  hf_model_cache:
+    driver: local

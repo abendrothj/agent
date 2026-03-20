@@ -9,7 +9,11 @@ RUN apt-get update && apt-get install -y \
 COPY requirements-sandbox.txt .
 RUN pip install --no-cache-dir -r requirements-sandbox.txt
 
-COPY cmd/sandbox-agent /app/cmd/sandbox-agent
+COPY cmd/sandbox-agent /app/cmd/sandbox_agent
 COPY internal /app/internal
 
-CMD ["python", "-m", "cmd.sandbox-agent.main"]
+ENV PYTHONPATH=/app
+
+# Note: directory is 'sandbox-agent' but Python module uses 'sandbox_agent'
+# (hyphens are not valid in Python module names)
+CMD ["python", "-m", "cmd.sandbox_agent.main"]

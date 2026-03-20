@@ -1,6 +1,19 @@
+# ⚠️  DEPRECATED — Ollama support removed in v9.3
+#
+# The Muscle service switched from Ollama to HuggingFace Transformers
+# in the release that introduced cmd/muscle/hf_model.py.
+# All code paths that previously referenced OllamaClient now go through
+# HFModel.  Delete this file after confirming no external imports remain.
+
+raise ImportError(
+    "OllamaClient is deprecated and removed. "
+    "Use HFModel from cmd/muscle/hf_model.py instead."
+)
+
+# ---- original code preserved below for audit trail only ----
+
 """
-Ollama Client Wrapper
-Handles inference requests to local Ollama instance, streaming tokens.
+Ollama Client Wrapper (ARCHIVED)
 """
 
 import httpx

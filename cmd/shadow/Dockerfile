@@ -12,4 +12,6 @@ RUN pip install --no-cache-dir -r requirements-shadow.txt
 COPY cmd/shadow /app/cmd/shadow
 COPY internal /app/internal
 
+ENV PYTHONPATH=/app
+
 CMD ["python", "-m", "cmd.shadow.main"]

@@ -202,19 +202,20 @@ class ShadowService:
 
 async def main():
     """Run Shadow service"""
+    from cmd.shadow.grpc_server import start_grpc_server
+
     shadow = ShadowService()
-    
+
     try:
         await shadow.initialize()
-        
-        logger.info(f"Shadow listening on {shadow.GRPC_HOST}:{shadow.GRPC_PORT}")
-        
-        # Keep running
-        await asyncio.Event().wait()
-    
+        server = await start_grpc_server(shadow, shadow.GRPC_HOST, shadow.GRPC_PORT)
+        logger.info(f"Shadow gRPC ready on {shadow.GRPC_HOST}:{shadow.GRPC_PORT}")
+        await server.wait_for_termination()
+
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-    
+        raise
+
     finally:
         await shadow.shutdown()
 

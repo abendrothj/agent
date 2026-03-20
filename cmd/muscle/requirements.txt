@@ -26,5 +26,5 @@ loguru>=0.7.0
 pydantic>=2.0.0
 cryptography>=41.0.0
 
-# Windows-specific (activity detection)
-pywin32>=306  # For GetLastInputInfo on Windows
+# Windows-specific (activity detection — skip on Linux/Docker)
+pywin32>=306; sys_platform == "win32"

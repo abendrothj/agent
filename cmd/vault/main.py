@@ -194,20 +194,20 @@ class VaultService:
 
 async def main():
     """Run Vault service"""
+    from cmd.vault.grpc_server import start_grpc_server
+
     vault = VaultService()
-    
+
     try:
         await vault.initialize()
-        
-        # Run gRPC server (will be implemented in grpc_server.py)
-        logger.info(f"Vault listening on {vault.GRPC_HOST}:{vault.GRPC_PORT}")
-        
-        # Keep running
-        await asyncio.Event().wait()
-    
+        server = await start_grpc_server(vault, vault.GRPC_HOST, vault.GRPC_PORT)
+        logger.info(f"Vault gRPC ready on {vault.GRPC_HOST}:{vault.GRPC_PORT}")
+        await server.wait_for_termination()
+
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-    
+        raise
+
     finally:
         await vault.shutdown()
 

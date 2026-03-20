@@ -13,13 +13,6 @@ import os
 class Config:
     """Muscle service configuration."""
     
-    # Ollama Settings (DEPRECATED - use HF settings instead)
-    # Keeping for backwards compatibility
-    ollama_host: str
-    ollama_model: str
-    ollama_max_tokens: int
-    ollama_temperature: float
-    
     # Hugging Face Model Settings
     hf_model_id: str
     hf_device: str
@@ -59,11 +52,6 @@ class Config:
             load_dotenv(dotenv_path=env_file)
         
         return cls(
-            ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-            ollama_model=os.getenv("OLLAMA_MODEL", "openhermes:latest"),
-            ollama_max_tokens=int(os.getenv("OLLAMA_MAX_TOKENS", "1024")),
-            ollama_temperature=float(os.getenv("OLLAMA_TEMPERATURE", "0.7")),
-            
             # Hugging Face settings
             hf_model_id=os.getenv("HF_MODEL_ID", "Qwen/Qwen2.5-Coder-7B-Instruct"),
             hf_device=os.getenv("HF_DEVICE", "cuda"),
@@ -94,7 +82,7 @@ class Config:
         """String representation (no secrets exposed)."""
         return (
             f"Config("
-            f"ollama_model={self.ollama_model}, "
+            f"hf_model_id={self.hf_model_id}, "
             f"grpc_port={self.grpc_port}, "
             f"log_level={self.log_level}, "
             f"activity_monitoring={self.activity_monitoring_enabled}"

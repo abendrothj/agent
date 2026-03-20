@@ -12,4 +12,6 @@ RUN pip install --no-cache-dir -r requirements-watchdog.txt
 COPY cmd/watchdog /app/cmd/watchdog
 COPY internal /app/internal
 
+ENV PYTHONPATH=/app
+
 CMD ["python", "-m", "cmd.watchdog.main"]

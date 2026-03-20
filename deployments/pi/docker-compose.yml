@@ -1,0 +1,266 @@
+# Pi deployment — all services that run on the Raspberry Pi.
+#
+# Prerequisites:
+#   docker network create vault_net
+#   docker network create sandbox_net
+#   Install certs to /opt/teammate-vault/certs/ per PI_SETUP.md
+#
+# Start:
+#   cp deployments/pi/.env.example deployments/pi/.env   # fill in real values
+#   docker compose --env-file deployments/pi/.env -f deployments/pi/docker-compose.yml up -d
+
+version: '3.8'
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: pi_postgres
+    environment:
+      POSTGRES_DB: agent_memory
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Sub-user passwords — read by init_db_users.sh on first start
+      SHADOW_DB_PASSWORD: ${SHADOW_DB_PASSWORD}
+      WATCHDOG_DB_PASSWORD: ${WATCHDOG_DB_PASSWORD}
+      SANDBOX_DB_PASSWORD: ${SANDBOX_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../internal/memory/db_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ../../scripts/init_db_users.sh:/docker-entrypoint-initdb.d/02-users.sh
+    ports:
+      - "5432:5432"
+    networks:
+      - vault_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: pi_redis
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - vault_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  memory_store:
+    image: neo4j:5
+    container_name: pi_neo4j
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m    # Pi RAM-friendly
+    volumes:
+      - teammate_memory:/data
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    networks:
+      - vault_net
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Pi Services ─────────────────────────────────────────────────────────────
+
+  vault:
+    build:
+      context: ../..
+      dockerfile: cmd/vault/Dockerfile
+    container_name: pi_vault
+    environment:
+      VAULT_DB_HOST: postgres
+      VAULT_DB_PORT: 5432
+      VAULT_DB_NAME: agent_memory
+      VAULT_DB_USER: vault
+      VAULT_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      VAULT_REDIS_HOST: redis
+      VAULT_REDIS_PORT: 6379
+      VAULT_GRPC_PORT: 50051
+      VAULT_GRPC_HOST: 0.0.0.0
+      NEO4J_URI: bolt://memory_store:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      GRAPHRAG_INDEX_DIR: /app/graphrag_index
+      VAULT_METRICS_PORT: 8000
+      # mTLS — certificates from /opt/teammate-vault/certs/ (see PI_SETUP.md)
+      CERT_FILE: /run/certs/client.crt
+      KEY_FILE: /run/certs/client.key
+      CA_CERT: /run/certs/muscle.crt
+      LOG_LEVEL: INFO
+    ports:
+      - "50051:50051"
+      - "8000:8000"
+    volumes:
+      - ../../graphrag_index:/app/graphrag_index
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/teammate-vault/certs:/run/certs:ro
+    networks:
+      - vault_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      memory_store:
+        condition: service_healthy
+    restart: unless-stopped
+
+  shadow:
+    build:
+      context: ../..
+      dockerfile: cmd/shadow/Dockerfile
+    container_name: pi_shadow
+    environment:
+      SHADOW_DB_HOST: postgres
+      SHADOW_DB_PORT: 5432
+      SHADOW_DB_NAME: agent_memory
+      SHADOW_DB_USER: shadow
+      SHADOW_DB_PASSWORD: ${SHADOW_DB_PASSWORD}
+      SHADOW_GRPC_PORT: 50053
+      SHADOW_GRPC_HOST: 0.0.0.0
+      SHADOW_METRICS_PORT: 8001
+      CERT_FILE: /run/certs/client.crt
+      KEY_FILE: /run/certs/client.key
+      CA_CERT: /run/certs/muscle.crt
+      LOG_LEVEL: INFO
+    ports:
+      - "50053:50053"
+      - "8001:8001"
+    volumes:
+      - /opt/teammate-vault/certs:/run/certs:ro
+    networks:
+      - vault_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  watchdog:
+    build:
+      context: ../..
+      dockerfile: cmd/watchdog/Dockerfile
+    container_name: pi_watchdog
+    environment:
+      WATCHDOG_DB_HOST: postgres
+      WATCHDOG_DB_PORT: 5432
+      WATCHDOG_DB_NAME: agent_memory
+      WATCHDOG_DB_USER: watchdog
+      WATCHDOG_DB_PASSWORD: ${WATCHDOG_DB_PASSWORD}
+      WATCHDOG_GRPC_PORT: 50054
+      WATCHDOG_GRPC_HOST: 0.0.0.0
+      NEO4J_URI: bolt://memory_store:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      GRAPHRAG_INDEX_DIR: /app/graphrag_index
+      WATCHDOG_METRICS_PORT: 8002
+      CERT_FILE: /run/certs/client.crt
+      KEY_FILE: /run/certs/client.key
+      CA_CERT: /run/certs/muscle.crt
+      LOG_LEVEL: INFO
+    ports:
+      - "50054:50054"
+      - "8002:8002"
+    volumes:
+      - ../../graphrag_index:/app/graphrag_index
+      - /opt/teammate-vault/certs:/run/certs:ro
+    networks:
+      - vault_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      memory_store:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sandbox-agent:
+    build:
+      context: ../..
+      dockerfile: cmd/sandbox-agent/Dockerfile
+    container_name: pi_sandbox
+    environment:
+      SANDBOX_DB_HOST: postgres
+      SANDBOX_DB_PORT: 5432
+      SANDBOX_DB_NAME: agent_memory
+      SANDBOX_DB_USER: sandbox
+      SANDBOX_DB_PASSWORD: ${SANDBOX_DB_PASSWORD}
+      MUSCLE_HOST: ${MUSCLE_HOST}
+      MUSCLE_PORT: 50051
+      SANDBOX_GRPC_PORT: 50055
+      SANDBOX_GRPC_HOST: 0.0.0.0
+      LOG_LEVEL: INFO
+    ports:
+      - "50055:50055"
+    networks:
+      - sandbox_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Observability ───────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: pi_prometheus
+    volumes:
+      - ../../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - vault_net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: pi_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../../observability/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../../observability/grafana_datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - vault_net
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  teammate_memory:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  vault_net:
+    external: true
+  sandbox_net:
+    external: true

@@ -1,0 +1,40 @@
+-Goal-
+Given a text document that is potentially relevant to this activity and a list of entity types,
+identify all entities of those types from the text and all relationships among the identified entities.
+
+-Steps-
+1. Identify all the claims. For each identified claim, extract the following information:
+   - Subject: Name of the entity that the claim is about, capitalized. The subject should be one of the named entities identified in the entity extraction prompt.
+   - Object: Name of the entity that the claim is directed toward, capitalized. The object should be one of the named entities identified in the entity extraction prompt.
+   - Claim Type: Overall category of the claim. Name it in a way that can be repeated across multiple text inputs, so that similar claims in different text inputs have the same claim type.
+   - Claim Status: **TRUE**, **FALSE**, or **SUSPECTED**. TRUE means the claim is confirmed, FALSE means it is refuted, SUSPECTED means it is not yet verified.
+   - Claim Description: Detailed description explaining the reasoning behind the claim, together with all the related evidence and references.
+   - Claim Date: Period (start_date, end_date) when the claim was made. Both start_date and end_date should be in ISO-8601 format. If the claim was made on a single date, set the same date for both start_date and end_date. If the date is unknown, return null.
+   - Claim Source Text: List of **all** quotes from the original text that are relevant to the claim.
+
+   Format each claim as follows ("claim"{tuple_delimiter}<subject_entity>{tuple_delimiter}<object_entity>{tuple_delimiter}<claim_type>{tuple_delimiter}<claim_status>{tuple_delimiter}<claim_start_date>{tuple_delimiter}<claim_end_date>{tuple_delimiter}<claim_description>{tuple_delimiter}<claim_source>)
+
+2. Return output in English as a single list of all the claims identified in steps 1 and 2. Use {record_delimiter} as the list delimiter.
+
+3. When finished, output {completion_delimiter}
+
+-Examples-
+######################
+Example 1:
+
+Entity types: [file, function, pull_request, failure, deployment, developer]
+Text:
+PR-187 introduced a memory leak in the embedding pipeline. The leak was traced to the batch_embed function in embedder.py. The failure resulted in a container OOM restart on 2024-06-01.
+
+######################
+Output:
+("claim"{tuple_delimiter}PR-187{tuple_delimiter}EMBEDDER.PY{tuple_delimiter}INTRODUCED REGRESSION{tuple_delimiter}TRUE{tuple_delimiter}2024-06-01T00:00:00{tuple_delimiter}2024-06-01T00:00:00{tuple_delimiter}PR-187 introduced a memory leak tracked to batch_embed in embedder.py, causing a container OOM restart{tuple_delimiter}PR-187 introduced a memory leak in the embedding pipeline. The leak was traced to the batch_embed function in embedder.py.)
+{completion_delimiter}
+
+######################
+-Real Data-
+######################
+Entity types: [file, function, pull_request, failure, deployment, developer]
+Text: {input_text}
+######################
+Output:

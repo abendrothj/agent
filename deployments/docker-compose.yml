@@ -9,10 +9,13 @@ services:
       POSTGRES_DB: agent_memory
       POSTGRES_USER: vault
       POSTGRES_PASSWORD: vault_secure_pass
+      SHADOW_DB_PASSWORD: shadow_secure_pass
+      WATCHDOG_DB_PASSWORD: watchdog_secure_pass
+      SANDBOX_DB_PASSWORD: sandbox_secure_pass
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./internal/memory/db_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
-      - ./scripts/init_db_users.sql:/docker-entrypoint-initdb.d/02-users.sql
+      - ./scripts/init_db_users.sh:/docker-entrypoint-initdb.d/02-users.sh
     ports:
       - "5432:5432"
     networks:
@@ -86,8 +89,10 @@ services:
       NEO4J_PASSWORD: super_secure_password
       GRAPHRAG_INDEX_DIR: /app/graphrag_index
       LOG_LEVEL: INFO
+      VAULT_METRICS_PORT: 8000
     ports:
       - "50051:50051"   # LAN-accessible — Win11 Muscle connects here
+      - "8000:8000"     # Prometheus metrics
     volumes:
       - ./graphrag_index:/app/graphrag_index
       - /var/run/docker.sock:/var/run/docker.sock  # For spawning ephemeral Sandboxes
@@ -117,8 +122,10 @@ services:
       SHADOW_GRPC_PORT: 50053
       SHADOW_GRPC_HOST: 0.0.0.0
       LOG_LEVEL: INFO
+      SHADOW_METRICS_PORT: 8001
     ports:
       - "50053:50053"
+      - "8001:8001"     # Prometheus metrics
     networks:
       - vault_net
     depends_on:
@@ -145,8 +152,10 @@ services:
       NEO4J_PASSWORD: super_secure_password
       GRAPHRAG_INDEX_DIR: /app/graphrag_index
       LOG_LEVEL: INFO
+      WATCHDOG_METRICS_PORT: 8002
     ports:
       - "50054:50054"
+      - "8002:8002"     # Prometheus metrics
     volumes:
       - ./graphrag_index:/app/graphrag_index
     networks:
@@ -156,6 +165,44 @@ services:
         condition: service_healthy
       memory_store:
         condition: service_healthy
+    restart: unless-stopped
+
+  # Prometheus — scrapes metrics from all Pi services
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: agent_prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - vault_net
+    restart: unless-stopped
+
+  # Grafana — dashboards for gRPC metrics, GPU telemetry, rollback events
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: agent_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-changeme}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana_datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - vault_net
+    depends_on:
+      - prometheus
     restart: unless-stopped
 
   # Sandbox Service — ephemeral dry-run executor
@@ -191,6 +238,10 @@ volumes:
   redis_data:
     driver: local
   teammate_memory:          # Neo4j graph data — persists relationships between restarts
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
     driver: local
 
 networks:

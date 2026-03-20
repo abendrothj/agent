@@ -1,0 +1,63 @@
+-Goal-
+You are an expert software engineering assistant analyzing automated agent activity logs.
+Your task is to identify entities in the text below and all relationships among the identified entities.
+
+-Steps-
+1. Identify all entities. For each identified entity, extract the following information:
+   - entity_name: Name of the entity, capitalized
+   - entity_type: One of the following types: [file, function, pull_request, failure, deployment, developer]
+   - entity_description: Comprehensive description of the entity's attributes and activities
+
+   Format each entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>)
+
+2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
+   For each pair of related entities, extract the following information:
+   - source_entity: name of the source entity, as identified in step 1
+   - target_entity: name of the target entity, as identified in step 1
+   - relationship_description: explanation as to why you think the source entity and the target entity are related to each other
+   - relationship_strength: a numeric score indicating strength of the relationship between the source entity and target entity (1-10)
+
+   Format each relationship as ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_strength>)
+
+3. Return output in English as a single list of all the entities and relationships identified in steps 1 and 2. Use {record_delimiter} as the list delimiter.
+
+4. When finished, output {completion_delimiter}
+
+-Examples-
+######################
+Example 1:
+
+Entity_types: [file, function, pull_request, failure, deployment, developer]
+Text:
+The deployment of PR-142 caused a failure in the vault approval flow. The failure originated in auth.py validate_token function. Developer alice resolved it by merging hotfix PR-143.
+
+######################
+Output:
+("entity"{tuple_delimiter}PR-142{tuple_delimiter}pull_request{tuple_delimiter}Pull request that introduced a breaking change in the vault approval flow)
+{record_delimiter}
+("entity"{tuple_delimiter}VAULT APPROVAL FLOW{tuple_delimiter}failure{tuple_delimiter}Failure event triggered by PR-142 deployment, affecting the main approval gating path)
+{record_delimiter}
+("entity"{tuple_delimiter}AUTH.PY{tuple_delimiter}file{tuple_delimiter}Source file containing the validate_token function that was the root cause of the failure)
+{record_delimiter}
+("entity"{tuple_delimiter}VALIDATE_TOKEN{tuple_delimiter}function{tuple_delimiter}Function in auth.py that failed during the vault approval flow execution)
+{record_delimiter}
+("entity"{tuple_delimiter}ALICE{tuple_delimiter}developer{tuple_delimiter}Developer who resolved the failure by merging the hotfix PR-143)
+{record_delimiter}
+("entity"{tuple_delimiter}PR-143{tuple_delimiter}pull_request{tuple_delimiter}Hotfix pull request merged by Alice to resolve the vault approval failure)
+{record_delimiter}
+("relationship"{tuple_delimiter}PR-142{tuple_delimiter}VAULT APPROVAL FLOW{tuple_delimiter}Deployment of PR-142 triggered the failure in the vault approval flow{tuple_delimiter}9)
+{record_delimiter}
+("relationship"{tuple_delimiter}AUTH.PY{tuple_delimiter}VALIDATE_TOKEN{tuple_delimiter}validate_token is defined inside auth.py and was the root cause of the failure{tuple_delimiter}10)
+{record_delimiter}
+("relationship"{tuple_delimiter}ALICE{tuple_delimiter}PR-143{tuple_delimiter}Alice authored and merged PR-143 to fix the issue{tuple_delimiter}9)
+{record_delimiter}
+("relationship"{tuple_delimiter}PR-143{tuple_delimiter}VAULT APPROVAL FLOW{tuple_delimiter}Hotfix PR-143 resolved the vault approval failure{tuple_delimiter}8)
+{completion_delimiter}
+
+######################
+-Real Data-
+######################
+Entity_types: [file, function, pull_request, failure, deployment, developer]
+Text: {input_text}
+######################
+Output:

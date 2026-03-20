@@ -15,6 +15,11 @@ RUN pip install --no-cache-dir -r requirements-vault.txt
 # Copy code
 COPY cmd/vault /app/cmd/vault
 COPY internal /app/internal
+COPY configs /app/configs
+COPY policies /app/policies
+
+# Ensure project root is on PYTHONPATH so `from internal.x import y` works
+ENV PYTHONPATH=/app
 
 # Run service
 CMD ["python", "-m", "cmd.vault.main"]

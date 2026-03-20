@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'pi-vault'
+
+scrape_configs:
+  - job_name: 'vault'
+    static_configs:
+      - targets: ['vault:8000']
+    metrics_path: /metrics
+
+  - job_name: 'shadow'
+    static_configs:
+      - targets: ['shadow:8001']
+    metrics_path: /metrics
+
+  - job_name: 'watchdog'
+    static_configs:
+      - targets: ['watchdog:8002']
+    metrics_path: /metrics
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+alerting:
+  alertmanagers: []
+
+rule_files: []

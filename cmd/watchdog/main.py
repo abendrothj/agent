@@ -289,19 +289,20 @@ This incident has been logged for learning and pattern analysis.
 
 async def main():
     """Run Watchdog service"""
+    from cmd.watchdog.grpc_server import start_grpc_server
+
     watchdog = WatchdogService()
-    
+
     try:
         await watchdog.initialize()
-        
-        logger.info(f"Watchdog listening on {watchdog.GRPC_HOST}:{watchdog.GRPC_PORT}")
-        
-        # Keep running
-        await asyncio.Event().wait()
-    
+        server = await start_grpc_server(watchdog, watchdog.GRPC_HOST, watchdog.GRPC_PORT)
+        logger.info(f"Watchdog gRPC ready on {watchdog.GRPC_HOST}:{watchdog.GRPC_PORT}")
+        await server.wait_for_termination()
+
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-    
+        raise
+
     finally:
         await watchdog.shutdown()
 

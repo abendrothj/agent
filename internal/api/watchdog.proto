@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package watchdog.v1;
+
+option go_package = "github.com/ja/agent/internal/api/watchdog";
+option python_package = "watchdog.v1";
+
+// WatchdogService: Health monitor and rollback controller on Pi
+// =============================================================
+// Win11 Muscle pushes runtime GPU/performance metrics to Watchdog.
+// Watchdog decides whether to trigger rollback and writes retrospectives.
+
+service Watchdog {
+  // ReportMetrics: Muscle pushes runtime metrics each request
+  rpc ReportMetrics(MetricsReport) returns (MetricsResponse);
+
+  // Health: Self-liveness check for external probing
+  rpc Health(WatchdogHealthCheck) returns (WatchdogHealthStatus);
+}
+
+// MetricsReport: Muscle sends this after every inference request
+message MetricsReport {
+  string request_id = 1;           // Trace ID linking back to Vault
+  float error_rate = 2;            // Rolling 5-min error rate (0.0-1.0)
+  int64 latency_p99_ms = 3;        // P99 latency in milliseconds
+  float gpu_temp_c = 4;            // GPU temperature, Celsius
+  float gpu_memory_available_mb = 5; // GPU VRAM headroom
+  int64 timestamp_ms = 6;          // Unix epoch milliseconds
+}
+
+// MetricsResponse: Watchdog tells Muscle what to do next
+message MetricsResponse {
+  bool acknowledged = 1;           // true normally
+  bool should_rollback = 2;        // true → Muscle should reset state
+  string reason = 3;               // Why rollback (empty if acknowledged)
+}
+
+// WatchdogHealthCheck: Empty ping
+message WatchdogHealthCheck {
+  string caller_id = 1;
+  int64 timestamp_ms = 2;
+}
+
+// WatchdogHealthStatus: Overall system health
+message WatchdogHealthStatus {
+  bool healthy = 1;
+  int32 active_alerts = 2;
+  int64 retrospectives_written = 3;
+  int64 rollbacks_triggered = 4;
+  string status = 5;               // "nominal", "degraded", "critical"
+  int64 uptime_seconds = 6;
+}

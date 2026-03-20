@@ -3,7 +3,7 @@
 # Verifies all components are running and responsive
 
 SERVICES=(
-    "vault:50052"
+    "vault:50051"
     "shadow:50053"
     "watchdog:50054"
     "sandbox-agent:50055"

@@ -1,4 +1,286 @@
-# Staged Autonomy v9.3 - Complete Implementation Guide
+# Staged Autonomy v9.3
+
+Personal agent that separates **untrusted reasoning** (Win11 GPU) from **trusted decision-making** (Raspberry Pi). The Pi orchestrates, gates approvals, and holds all state and secrets. Win11 does stateless inference only.
+
+## Architecture
+
+```
+Win11 (RTX 3060Ti)                    Raspberry Pi
+───────────────────                   ────────────────────────────────────────
+Muscle                                Vault :50051   ← Muscle connects here
+ HuggingFace Transformers              LangGraph 9-node StateGraph
+ Stateless inference                   Tier classifier + MFA gating
+ GPU metric reporting                  LangGraph PostgresSaver checkpoints
+ Activity-gated queuing                GraphRAG long-term memory query
+        │                                    │
+        │  mTLS gRPC                  Shadow :50053
+        └────────────────────────────  24h baseline recorder
+                                       Canary eligibility (semantic sim)
+
+                                      Watchdog :50054
+                                       GPU / latency / error-rate monitor
+                                       Failure retrospective indexer
+                                       Rollback trigger
+
+                                      Sandbox :50055  (sandbox_net only)
+                                       Ephemeral dry-run executor
+
+                                      PostgreSQL + pgvector
+                                       Vector memory, ledger, LangGraph checkpoints
+
+                                      Redis    — rate-limit counters, sessions
+                                      Neo4j    — GraphRAG real-time writes
+```
+
+## Risk Tier System
+
+| Tier | Name     | Approval        | Shadow min | Sim threshold | Rate limit  |
+|------|----------|-----------------|------------|---------------|-------------|
+| 1    | Safe     | None            | —          | —             | 1 000 /hr   |
+| 2    | Minor    | Self / cached   | —          | —             | 100 /hr     |
+| 3    | Major    | Human + MFA     | 24 h       | 85 %          | 10 /hr      |
+| 4    | Critical | Human + MFA     | 48 h       | 90 %          | 1 /hr       |
+
+Tier 4 also maintains a 24 h auto-block cache for identical rejected prompts.
+
+## File Structure
+
+```
+agent/
+├── cmd/
+│   ├── muscle/              # Win11 — HuggingFace inference service
+│   │   ├── main.py          # Entry point
+│   │   ├── grpc_server.py   # Accepts connections from Pi Vault
+│   │   ├── hf_model.py      # HuggingFace Transformers wrapper
+│   │   ├── vault_client.py  # Calls Pi Vault to propose actions
+│   │   ├── activity_monitor.py
+│   │   ├── config.py
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
+│   ├── vault/               # Pi — LangGraph orchestrator
+│   │   ├── main.py
+│   │   ├── grpc_server.py   # Port 50051
+│   │   ├── langgraph_vault.py  # 9-node StateGraph
+│   │   └── Dockerfile
+│   ├── shadow/              # Pi — baseline recorder & canary gating
+│   │   ├── main.py
+│   │   ├── grpc_server.py   # Port 50053
+│   │   └── Dockerfile
+│   ├── watchdog/            # Pi — health monitor & retrospective indexer
+│   │   ├── main.py
+│   │   ├── grpc_server.py   # Port 50054
+│   │   └── Dockerfile
+│   └── sandbox-agent/       # Pi — ephemeral dry-run executor
+│       ├── main.py
+│       └── Dockerfile
+├── internal/
+│   ├── api/                 # .proto files + generated *_pb2.py stubs
+│   ├── core/
+│   │   ├── risk/            # Tier classifier
+│   │   └── metrics/         # Canary / shadow evaluator
+│   ├── memory/
+│   │   ├── vector/          # pgvector semantic search
+│   │   ├── ledger/          # Immutable action log
+│   │   ├── context/         # Redis session manager
+│   │   └── graph/           # GraphRAG + Neo4j client
+│   ├── providers/           # GitHub integration
+│   └── safety/              # Blocked-pattern validator
+├── deployments/
+│   ├── pi/
+│   │   ├── docker-compose.yml   # All Pi services
+│   │   └── .env.example
+│   ├── win11/
+│   │   ├── docker-compose.yml   # Muscle only
+│   │   ├── .env.example
+│   │   └── certs/               # Place muscle.crt, muscle.key, client.crt here
+│   └── docker-compose.yml       # Dev all-in-one
+├── graphrag_index/
+│   ├── settings.yaml
+│   ├── prompts/             # Entity extraction, community report, claim extraction
+│   └── input/               # Documents staged for next index rebuild
+├── policies/
+│   ├── approval_rules.yaml
+│   ├── canary_thresholds.yaml
+│   └── rollback_triggers.yaml
+├── configs/
+│   └── base_policy.yaml
+├── observability/
+│   ├── prometheus.yml
+│   ├── grafana_datasource.yml
+│   └── dashboards/
+│       └── vault.json       # Grafana: gRPC rates, GPU telemetry, rollbacks
+├── scripts/
+│   ├── gen_protos.sh        # Regenerate *_pb2.py from .proto files
+│   ├── db_migrate.sh        # Apply schema + verify dirs
+│   ├── emergency_rollback.sh
+│   └── health_check.sh
+└── tests/
+    ├── conftest.py          # Shared AsyncMock fixtures
+    ├── unit/
+    │   ├── test_classifier.py      # Keyword scoring, tier thresholds
+    │   ├── test_safety_validator.py # Blocked patterns, scope rules
+    │   ├── test_shadow_logic.py    # Cosine similarity, age thresholds
+    │   ├── test_watchdog_logic.py  # Rollback trigger thresholds
+    │   ├── test_langgraph_nodes.py # Individual LangGraph node logic
+    │   └── test_graph_client.py   # GraphRAG client (mocked Neo4j)
+    └── integration/
+        └── test_approval_flow.py  # In-process gRPC: T1 approve, T4 reject, T3 MFA
+```
+
+## Setup
+
+### On the Pi
+
+1. **Install certificates** (see [PI_SETUP.md](PI_SETUP.md)):
+   ```bash
+   sudo mkdir -p /opt/teammate-vault/certs
+   sudo install -m 600 client.crt /opt/teammate-vault/certs/
+   sudo install -m 600 client.key /opt/teammate-vault/certs/
+   sudo install -m 600 muscle.crt /opt/teammate-vault/certs/
+   ```
+
+2. **Generate proto stubs** (once, or after any `.proto` change):
+   ```bash
+   pip install grpcio-tools>=1.60.0
+   bash scripts/gen_protos.sh
+   ```
+
+3. **Create networks and start services**:
+   ```bash
+   docker network create vault_net
+   docker network create sandbox_net
+   cp deployments/pi/.env.example deployments/pi/.env
+   # Edit .env: set MUSCLE_HOST, passwords
+   bash scripts/db_migrate.sh
+   docker compose --env-file deployments/pi/.env \
+     -f deployments/pi/docker-compose.yml up -d
+   ```
+
+4. **Verify**:
+   ```bash
+   bash scripts/health_check.sh
+   ```
+
+### On Win11 (Muscle)
+
+1. **Install certificates** (see [WIN11_SETUP.md](WIN11_SETUP.md)) — place in `deployments/win11/certs/`:
+   - `muscle.crt` — Win11's TLS certificate
+   - `muscle.key` — Win11's private key (never copy to Pi)
+   - `client.crt` — Pi's certificate (trust anchor)
+
+2. **Generate proto stubs** (Windows):
+   ```cmd
+   pip install grpcio-tools
+   python -m grpc_tools.protoc -I internal/api --python_out=internal/api --grpc_python_out=internal/api internal/api/muscle.proto internal/api/vault.proto
+   ```
+
+3. **Start Muscle**:
+   ```cmd
+   cp deployments/win11/.env.example deployments/win11/.env
+   # Edit .env: set VAULT_API_URL to your Pi's LAN IP
+   docker compose --env-file deployments/win11/.env -f deployments/win11/docker-compose.yml up -d
+   ```
+
+## Memory System
+
+### Vector Memory (PostgreSQL + pgvector)
+Semantic search over PR history and failure patterns. 1024-dim embeddings.
+Used by: Shadow (baseline similarity), Watchdog (retrospective storage).
+
+### GraphRAG (Microsoft graphrag + Neo4j)
+Two-layer long-term memory:
+- **Neo4j** (`memory_store:7687`) — real-time writes; every failure retrospective and baseline indexed immediately as a `:Document` node
+- **graphrag parquet index** — LLM-enhanced community detection over PR / failure entities
+
+Rebuild index (requires `OPENAI_API_KEY`):
+```bash
+graphrag index --root graphrag_index
+# incremental:
+graphrag index --root graphrag_index --update
+```
+
+### Ledger (immutable action log)
+Every approval, rejection, rollback written to PostgreSQL. Never deleted.
+
+### Context (Redis, TTL-based)
+Short-term session state and per-tier rate-limit counters.
+
+## gRPC Ports
+
+| Service   | Pi Port | Metrics Port | Description                    |
+|-----------|---------|--------------|--------------------------------|
+| Vault     | 50051   | 8000         | Orchestrator — Muscle connects |
+| Shadow    | 50053   | 8001         | Baseline recorder              |
+| Watchdog  | 50054   | 8002         | Health monitor                 |
+| Sandbox   | 50055   | —            | Dry-run executor               |
+| Muscle    | 50051   | —            | Win11 inference (own port)     |
+
+## Observability
+
+- **Prometheus** — scrapes all three Pi services every 15 s
+- **Grafana** at `:3000` — Vault throughput, latency p50/p99, GPU temperature gauge, VRAM gauge, rollback events
+- Metrics: `vault_grpc_requests_total`, `shadow_grpc_requests_total`, `watchdog_gpu_temp_celsius`, `watchdog_rollbacks_total`
+
+## Testing
+
+Tests run entirely on macOS (or any dev machine) — no Pi, no DB, no gRPC server needed.
+
+```bash
+# Install test dependencies
+pip install pytest pytest-asyncio
+
+# All unit tests (pure logic, no I/O)
+pytest tests/unit/ -v
+
+# Integration tests (in-process gRPC, skips if proto stubs not generated)
+pytest tests/integration/ -v
+
+# Run everything
+pytest tests/ -v
+```
+
+Unit tests cover:
+- **`test_classifier.py`** — keyword scoring engine (1 vs 2 hits), `_score_keywords`, all tier boundaries, policy helpers
+- **`test_safety_validator.py`** — every blocked pattern, scope allowlist per tier, violation counter throttle, length guard
+- **`test_shadow_logic.py`** — `_cosine_similarity` with orthogonal/identical/known-angle vectors, canary sim thresholds (T4=0.90, T3=0.85), baseline age thresholds (T4=48h, T3=24h)
+- **`test_watchdog_logic.py`** — exact threshold values pinned, boundary tests for all four trigger conditions (error rate > 0.10, latency > 5000ms, GPU temp > 85°C, VRAM < 512MB)
+
+## Policies
+
+| File | Purpose |
+|------|---------|
+| `policies/approval_rules.yaml` | MFA / signature requirements per tier |
+| `policies/canary_thresholds.yaml` | Success metrics for canary promotion |
+| `policies/rollback_triggers.yaml` | Error / latency abort conditions |
+| `configs/base_policy.yaml` | Global immutable policy |
+
+## Emergency Procedures
+
+```bash
+# Immediate rollback
+bash scripts/emergency_rollback.sh
+
+# Database rebuild (destroys all memory)
+docker compose -f deployments/pi/docker-compose.yml down -v
+bash scripts/db_migrate.sh
+docker compose -f deployments/pi/docker-compose.yml up -d
+```
+
+## Security Notes
+
+- **Vault is ground truth** — all decisions are immutable in the ledger
+- **Muscle is stateless** — no credentials or decision state on Win11
+- **mTLS required** — Pi certs in `/opt/teammate-vault/certs/`, Win11 certs in `./certs/`; services fall back to insecure only when cert files are missing (dev mode)
+- **Tier 4 cache** — identical rejections auto-block for 24 h (policy immutable)
+- **sandbox_net isolation** — Sandbox container has no access to vault_net secrets
+
+## References
+
+- [PI_SETUP.md](PI_SETUP.md) — certificate installation on Pi
+- [WIN11_SETUP.md](WIN11_SETUP.md) — Win11 CUDA + certificate setup
+- [GrpcContractReference.md](GrpcContractReference.md) — full proto API reference
+- `internal/api/*.proto` — service contracts
+- `internal/memory/db_schema.sql` — PostgreSQL schema
 
 ## Overview
 
