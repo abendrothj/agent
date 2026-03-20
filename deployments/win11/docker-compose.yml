@@ -11,8 +11,6 @@
 #   # Edit .env: set VAULT_API_URL to your Pi's LAN IP
 #   docker compose --env-file deployments/win11/.env -f deployments/win11/docker-compose.yml up -d
 
-version: '3.8'
-
 services:
   muscle:
     build:
