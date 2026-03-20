@@ -13,11 +13,21 @@ import os
 class Config:
     """Muscle service configuration."""
     
-    # Ollama Settings
+    # Ollama Settings (DEPRECATED - use HF settings instead)
+    # Keeping for backwards compatibility
     ollama_host: str
     ollama_model: str
     ollama_max_tokens: int
     ollama_temperature: float
+    
+    # Hugging Face Model Settings
+    hf_model_id: str
+    hf_device: str
+    hf_dtype: str  # "float16" or "float32"
+    hf_max_tokens: int
+    hf_temperature: float
+    hf_top_k: int
+    hf_top_p: float
     
     # gRPC Settings
     grpc_host: str
@@ -32,6 +42,12 @@ class Config:
     log_level: str
     log_file: str
     
+    # Activity Monitoring (Win11 only)
+    activity_monitoring_enabled: bool
+    gpu_threshold_percent: float
+    idle_threshold_sec: float
+    activity_check_interval_sec: float
+    
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from .env file and environment."""
@@ -43,9 +59,18 @@ class Config:
         
         return cls(
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-            ollama_model=os.getenv("OLLAMA_MODEL", "deepseek-r1:8b"),
+            ollama_model=os.getenv("OLLAMA_MODEL", "openhermes:latest"),
             ollama_max_tokens=int(os.getenv("OLLAMA_MAX_TOKENS", "1024")),
             ollama_temperature=float(os.getenv("OLLAMA_TEMPERATURE", "0.7")),
+            
+            # Hugging Face settings
+            hf_model_id=os.getenv("HF_MODEL_ID", "NousResearch/Hermes-2.5-Mistral-7B"),
+            hf_device=os.getenv("HF_DEVICE", "cuda"),
+            hf_dtype=os.getenv("HF_DTYPE", "float16"),
+            hf_max_tokens=int(os.getenv("HF_MAX_TOKENS", "1024")),
+            hf_temperature=float(os.getenv("HF_TEMPERATURE", "0.7")),
+            hf_top_k=int(os.getenv("HF_TOP_K", "50")),
+            hf_top_p=float(os.getenv("HF_TOP_P", "0.9")),
             
             grpc_host=os.getenv("GRPC_HOST", "0.0.0.0"),
             grpc_port=int(os.getenv("GRPC_PORT", "50051")),
@@ -56,6 +81,11 @@ class Config:
             
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_file=os.getenv("LOG_FILE", "./logs/muscle.log"),
+            
+            activity_monitoring_enabled=os.getenv("ACTIVITY_MONITORING_ENABLED", "true").lower() == "true",
+            gpu_threshold_percent=float(os.getenv("GPU_THRESHOLD_PERCENT", "30.0")),
+            idle_threshold_sec=float(os.getenv("IDLE_THRESHOLD_SEC", "300")),
+            activity_check_interval_sec=float(os.getenv("ACTIVITY_CHECK_INTERVAL_SEC", "5")),
         )
     
     def __str__(self):
@@ -64,6 +94,7 @@ class Config:
             f"Config("
             f"ollama_model={self.ollama_model}, "
             f"grpc_port={self.grpc_port}, "
-            f"log_level={self.log_level}"
+            f"log_level={self.log_level}, "
+            f"activity_monitoring={self.activity_monitoring_enabled}"
             f")"
         )

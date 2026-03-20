@@ -8,27 +8,25 @@ import time
 from loguru import logger
 import muscle_pb2
 import muscle_pb2_grpc
-from ollama_wrapper import OllamaClient
+from hf_model import HFModel
+from typing import Optional
 
 
 class MuscleServicer(muscle_pb2_grpc.MuscleServicer):
     """Implementation of the Muscle gRPC service."""
     
-    def __init__(self, ollama_client: OllamaClient):
-        self.ollama = ollama_client
+    def __init__(self, hf_model: HFModel, activity_monitor: Optional['ActivityMonitor'] = None):
+        self.hf_model = hf_model
+        self.activity_monitor = activity_monitor
         self.request_count = 0
         self.total_tokens_generated = 0
         self.start_time = time.time()
     
     async def GenerateResponse(self, request: muscle_pb2.PromptRequest, context):
         """
-        Main RPC: Stream tokens from Ollama in response to PromptRequest.
+        Main RPC: Stream tokens from HuggingFace Transformers in response to PromptRequest.
         
-        Security properties:
-        - No state persistence (each call is independent)
-        - No filesystem access (only inference)
-        - No network access except back to Pi
-        - Input validation on prompt size
+        Activity-aware: queues requests if user is active.
         """
         
         session_id = request.session_id
@@ -52,12 +50,37 @@ class MuscleServicer(muscle_pb2_grpc.MuscleServicer):
             f"Intent: {action_intent}, Prompt len: {len(prompt)}"
         )
         
+        # Check user activity - queue if not idle
+        if self.activity_monitor and not self.activity_monitor.is_idle():
+            queued = self.activity_monitor.queue_request(session_id, {
+                "prompt": prompt,
+                "system_context": system_context,
+                "action_intent": action_intent
+            })
+            
+            if queued:
+                logger.info(f"[{session_id}] User active - request queued")
+                yield muscle_pb2.TokenResponse(
+                    token="",
+                    status="queued",
+                    error_msg=f"System is in use. Request queued. Queue depth: {len(self.activity_monitor.request_queue)}"
+                )
+                return
+            else:
+                logger.warning(f"[{session_id}] Queue full - request rejected")
+                yield muscle_pb2.TokenResponse(
+                    token="",
+                    status="error",
+                    error_msg="Request queue is full. Try again later."
+                )
+                return
+        
         start_time = time.time()
         token_index = 0
         
         try:
-            # Stream tokens from Ollama
-            async for token in self.ollama.generate_stream(prompt, system_context):
+            # Stream tokens from HuggingFace model
+            async for token in self.hf_model.generate_stream(prompt, system_context):
                 token_index += 1
                 self.total_tokens_generated += 1
                 
@@ -68,7 +91,7 @@ class MuscleServicer(muscle_pb2_grpc.MuscleServicer):
                     metadata=muscle_pb2.ResponseMetadata(
                         confidence=0.9,  # Placeholder
                         tokens_used=token_index,
-                        model_name=self.ollama.model,
+                        model_name=self.hf_model.model_id,
                     ),
                     status="ok"
                 )
@@ -88,7 +111,7 @@ class MuscleServicer(muscle_pb2_grpc.MuscleServicer):
                     confidence=0.95,
                     tokens_used=token_index,
                     inference_time_ms=inference_time * 1000,
-                    model_name=self.ollama.model,
+                    model_name=self.hf_model.model_id,
                 ),
                 status="ok"
             )
@@ -114,20 +137,51 @@ class MuscleServicer(muscle_pb2_grpc.MuscleServicer):
         """
         
         uptime = time.time() - self.start_time
-        status = await self.ollama.health_status()
         
-        if status.get("healthy"):
+        try:
+            await self.hf_model.health_check()
+            status_info = self.hf_model.get_status()
+            
             return muscle_pb2.HealthResponse(
                 healthy=True,
                 status="ready",
                 uptime_seconds=int(uptime),
-                model_loaded=self.ollama.model
+                model_loaded=self.hf_model.model_id
             )
-        else:
-            logger.warning(f"Health check: Ollama not healthy. {status}")
+        except Exception as e:
+            logger.warning(f"Health check: Model not healthy. {e}")
             return muscle_pb2.HealthResponse(
                 healthy=False,
                 status="degraded",
                 uptime_seconds=int(uptime),
                 model_loaded=""
             )
+    
+    async def GetActivityStatus(self, request: muscle_pb2.ActivityStatusRequest, context):
+        """
+        Get system activity status (queue depth, idle status, GPU utilization).
+        Called by Pi to decide whether to send requests to Muscle.
+        """
+        
+        if not self.activity_monitor:
+            # Activity monitoring disabled
+            return muscle_pb2.ActivityStatusResponse(
+                idle_status="unknown",
+                queue_depth=0,
+                queue_capacity=0,
+                accepting_requests=True,
+                gpu_utilization_percent=0,
+                idle_duration_seconds=0,
+            )
+        
+        status_dict = self.activity_monitor.get_status()
+        
+        return muscle_pb2.ActivityStatusResponse(
+            idle_status=status_dict.get("idle_status", "unknown"),
+            queue_depth=status_dict.get("queue_depth", 0),
+            queue_capacity=status_dict.get("queue_capacity", 0),
+            accepting_requests=status_dict.get("accepting_requests", True),
+            gpu_utilization_percent=status_dict.get("gpu_utilization_percent", 0),
+            idle_duration_seconds=int(status_dict.get("idle_duration_seconds", 0)),
+            user_active=status_dict.get("user_active", False),
+        )

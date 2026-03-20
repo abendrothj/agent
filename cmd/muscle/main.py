@@ -4,7 +4,7 @@ Win11 Stateless Inference gRPC Server
 
 This service:
 1. Accepts PromptRequest from Pi (Vault)
-2. Streams tokens from Ollama inference
+2. Streams tokens from HuggingFace Transformers inference
 3. Returns TokenResponse (no state persistence)
 4. Communicates ONLY with Pi via mTLS
 """
@@ -19,11 +19,12 @@ from loguru import logger
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config
-from ollama_wrapper import OllamaClient
+from hf_model import HFModel
 from grpc_server import MuscleServicer
 import grpc
 from concurrent import futures
 import muscle_pb2_grpc
+from activity_monitor import ActivityMonitor
 
 
 def setup_logging(config: Config):
@@ -47,7 +48,7 @@ def setup_logging(config: Config):
     logger.info(f"Logging initialized. Level: {config.log_level}, File: {log_file}")
 
 
-async def start_grpc_server(config: Config, ollama_client: OllamaClient):
+async def start_grpc_server(config: Config, hf_model: HFModel, activity_monitor: ActivityMonitor):
     """Start the gRPC server with mTLS."""
     
     # Load certificates
@@ -75,8 +76,8 @@ async def start_grpc_server(config: Config, ollama_client: OllamaClient):
         futures.ThreadPoolExecutor(max_workers=10)
     )
     
-    # Register servicer
-    servicer = MuscleServicer(ollama_client)
+    # Register servicer (pass HF model for inference)
+    servicer = MuscleServicer(hf_model, activity_monitor)
     muscle_pb2_grpc.add_MuscleServicer_to_server(servicer, server)
     
     # Add secure port
@@ -98,26 +99,54 @@ async def main():
         
         setup_logging(config)
         
-        # Initialize Ollama client
-        logger.info(f"Connecting to Ollama at {config.ollama_host}...")
-        ollama_client = OllamaClient(
-            host=config.ollama_host,
-            model=config.ollama_model,
-            max_tokens=config.ollama_max_tokens,
-            temperature=config.ollama_temperature
+        # Initialize HuggingFace model
+        logger.info(f"Loading Hugging Face model: {config.hf_model_id}...")
+        hf_model = HFModel(
+            model_id=config.hf_model_id,
+            device=config.hf_device,
+            dtype=config.hf_dtype,
+            max_tokens=config.hf_max_tokens,
+            temperature=config.hf_temperature,
+            top_k=config.hf_top_k,
+            top_p=config.hf_top_p
         )
         
-        # Verify Ollama is reachable
+        # Load the model asynchronously
         try:
-            await ollama_client.health_check()
-            logger.info(f"✓ Ollama healthy. Model: {config.ollama_model}")
+            await hf_model.load_model()
+            logger.info(f"✓ Model loaded successfully from HuggingFace Hub")
+            status = hf_model.get_status()
+            logger.info(f"  Device: {status['device']}, Params: {status['total_params']:,}, VRAM: {status['gpu_memory_allocated_gb']:.1f}GB")
         except Exception as e:
-            logger.error(f"✗ Ollama health check failed: {e}")
-            logger.error("Is Ollama running? (ollama serve)")
+            logger.error(f"✗ Failed to load model: {e}")
+            logger.error("Check model_id, CUDA/GPU availability, and disk space")
             sys.exit(1)
         
+        # Verify model is healthy
+        try:
+            await hf_model.health_check()
+            logger.info(f"✓ Model health check passed")
+        except Exception as e:
+            logger.error(f"✗ Model health check failed: {e}")
+            sys.exit(1)
+        
+        # Initialize activity monitor
+        activity_monitor = None
+        if config.activity_monitoring_enabled:
+            activity_monitor = ActivityMonitor(
+                gpu_threshold_percent=config.gpu_threshold_percent,
+                idle_threshold_sec=config.idle_threshold_sec,
+                check_interval_sec=config.activity_check_interval_sec
+            )
+            logger.info("✓ Activity monitoring enabled")
+            
+            # Start monitoring loop in background
+            asyncio.create_task(activity_monitor.monitor_loop())
+        else:
+            logger.info("Activity monitoring disabled")
+        
         # Start gRPC server
-        server = await start_grpc_server(config, ollama_client)
+        server = await start_grpc_server(config, hf_model, activity_monitor)
         logger.info("✓ Muscle service ready to accept requests from Pi")
         
         # Handle graceful shutdown

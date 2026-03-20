@@ -48,7 +48,7 @@ Edit `..\..\\.env`:
 
 ```env
 OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=deepseek-r1:8b
+OLLAMA_MODEL=openhermes:7b
 GRPC_PORT=50051
 GRPC_HOST=0.0.0.0
 CERT_FILE=./certs/muscle.crt
@@ -77,7 +77,7 @@ Expected output:
 2026-03-19 14:30:45 | INFO | Teammate Muscle Service Starting
 2026-03-19 14:30:45 | INFO | Configuration loaded: Config(...)
 2026-03-19 14:30:46 | INFO | Connection to Ollama at http://localhost:11434...
-2026-03-19 14:30:47 | INFO | ✓ Ollama healthy. Model: deepseek-r1:8b
+2026-03-19 14:30:47 | INFO | ✓ Ollama healthy. Model: openhermes:7b
 2026-03-19 14:30:48 | INFO | Starting gRPC server on 0.0.0.0:50051 with mTLS
 2026-03-19 14:30:48 | INFO | ✓ Muscle service ready to accept requests from Pi
 ```
@@ -122,6 +122,77 @@ Each response contains:
 - `model_loaded` — Which model is in memory
 
 **Called by:** Watchdog (Pi) every 30s to confirm Muscle is alive.
+
+### RPC: `GetActivityStatus`
+
+**Request:** `ActivityStatusRequest`
+- `session_id` — Trace ID
+
+**Response:** `ActivityStatusResponse`
+
+Returns real-time activity status:
+- `idle_status` — "active", "transitioning", or "idle"
+- `queue_depth` — Number of pending requests
+- `queue_capacity` — Max requests allowed in queue (100)
+- `accepting_requests` — Boolean (true if idle and will process)
+- `gpu_utilization_percent` — Current GPU usage (%)
+- `idle_duration_seconds` — Seconds idle since last activity
+- `user_active` — Boolean (keyboard/mouse activity detected)
+
+**Called by:** Pi Vault to check if Win11 Muscle is available before sending requests.
+
+---
+
+## Activity Detection (Request Queuing)
+
+The Muscle service automatically detects user activity and queues requests when you're actively using your PC.
+
+### How It Works
+
+**When you're active (gaming, working):**
+1. Incoming `GenerateResponse()` requests are **queued** (not rejected)
+2. Response: status="queued" with queue depth
+3. Request waits for idle period
+
+**When you become idle:**
+1. Machine must be idle for 5+ minutes (configurable)
+2. Queued requests are processed in order (FIFO)
+3. GPU freed up for agent work
+
+**Detection Methods:**
+- **GPU Utilization:** Polls NVIDIA GPU every 5s. If >30% in use → active
+- **Input Activity:** Checks Windows `GetLastInputInfo`. If keyboard/mouse used → active
+
+### Configuration
+
+In `.env`:
+
+```env
+ACTIVITY_MONITORING_ENABLED=true          # Enable/disable feature
+GPU_THRESHOLD_PERCENT=30                  # GPU >30% = mark as active
+IDLE_THRESHOLD_SEC=300                    # 5 min idle before processing
+ACTIVITY_CHECK_INTERVAL_SEC=5             # Check every 5 sec
+```
+
+### Status in Logs
+
+```
+DEBUG | 🎮 Status: active | GPU: 42.1% | Idle: 0s | Queue: 0
+DEBUG | 🎮 Status: active | GPU: 38.5% | Idle: 5s | Queue: 1
+DEBUG | ⏳ Status: transitioning | GPU: 5.2% | Idle: 10s | Queue: 2
+DEBUG | 💤 Status: idle | GPU: 0.5% | Idle: 305s | Queue: 2
+INFO | Processing queued request req_001 (waited 330.2s)
+```
+
+### Disable If Not Needed
+
+If running Muscle on a separate non-gaming machine:
+
+```env
+ACTIVITY_MONITORING_ENABLED=false
+```
+
+---
 
 ## Security Properties
 

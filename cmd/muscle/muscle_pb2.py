@@ -171,3 +171,44 @@ class HealthResponse(_message.Message):
         uptime_seconds: _Optional[int] = ...,
         model_loaded: _Optional[str] = ...,
     ) -> None: ...
+
+class ActivityStatusRequest(_message.Message):
+    """Request for activity status."""
+    __slots__ = ('session_id',)
+    
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    
+    def __init__(self, *, session_id: _Optional[str] = ...) -> None: ...
+
+class ActivityStatusResponse(_message.Message):
+    """Response: system activity status."""
+    __slots__ = ('idle_status', 'queue_depth', 'queue_capacity', 'accepting_requests', 'gpu_utilization_percent', 'idle_duration_seconds', 'user_active')
+    
+    IDLE_STATUS_FIELD_NUMBER: _ClassVar[int]
+    QUEUE_DEPTH_FIELD_NUMBER: _ClassVar[int]
+    QUEUE_CAPACITY_FIELD_NUMBER: _ClassVar[int]
+    ACCEPTING_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    GPU_UTILIZATION_PERCENT_FIELD_NUMBER: _ClassVar[int]
+    IDLE_DURATION_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    USER_ACTIVE_FIELD_NUMBER: _ClassVar[int]
+    
+    idle_status: str           # "active", "transitioning", "idle"
+    queue_depth: int
+    queue_capacity: int
+    accepting_requests: bool
+    gpu_utilization_percent: float
+    idle_duration_seconds: int
+    user_active: bool
+    
+    def __init__(
+        self,
+        *,
+        idle_status: _Optional[str] = ...,
+        queue_depth: _Optional[int] = ...,
+        queue_capacity: _Optional[int] = ...,
+        accepting_requests: _Optional[bool] = ...,
+        gpu_utilization_percent: _Optional[float] = ...,
+        idle_duration_seconds: _Optional[int] = ...,
+        user_active: _Optional[bool] = ...,
+    ) -> None: ...

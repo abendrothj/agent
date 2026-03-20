@@ -30,6 +30,16 @@ class MuscleServicer(object):
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
+    
+    async def GetActivityStatus(
+        self,
+        request: muscle_pb2.ActivityStatusRequest,
+        context: grpc.aio.ServicerContext
+    ) -> muscle_pb2.ActivityStatusResponse:
+        """Get activity status."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
 
 class MuscleStub(object):
@@ -47,6 +57,11 @@ class MuscleStub(object):
             request_serializer=muscle_pb2.HealthRequest.SerializeToString,
             response_deserializer=muscle_pb2.HealthResponse.FromString,
         )
+        self.GetActivityStatus = channel.unary_unary(
+            '/muscle.api.Muscle/GetActivityStatus',
+            request_serializer=muscle_pb2.ActivityStatusRequest.SerializeToString,
+            response_deserializer=muscle_pb2.ActivityStatusResponse.FromString,
+        )
 
 
 def add_MuscleServicer_to_server(servicer: MuscleServicer, server: grpc.aio.Server):
@@ -61,6 +76,11 @@ def add_MuscleServicer_to_server(servicer: MuscleServicer, server: grpc.aio.Serv
             servicer.Health,
             request_deserializer=muscle_pb2.HealthRequest.FromString,
             response_serializer=muscle_pb2.HealthResponse.SerializeToString,
+        ),
+        'GetActivityStatus': grpc.aio.unary_unary_rpc_method_handler(
+            servicer.GetActivityStatus,
+            request_deserializer=muscle_pb2.ActivityStatusRequest.FromString,
+            response_serializer=muscle_pb2.ActivityStatusResponse.SerializeToString,
         ),
     }
     
