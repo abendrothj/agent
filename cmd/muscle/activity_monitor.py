@@ -103,27 +103,26 @@ class ActivityMonitor:
     def get_last_input_time(self) -> float:
         """Get elapsed time since last keyboard/mouse input (Windows-specific)."""
         try:
-            if not win32api:
+            if not win32api or not ctypes:
                 # Fallback: assume active if we can't check
                 return 0.0
-            
-            # Get struct_size for LASTINPUTINFO
-            lastInputInfo = ctypes.Structure()
-            lastInputInfo._fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
-            lastInputInfo.cbSize = ctypes.sizeof(lastInputInfo)
-            
-            # Call GetLastInputInfo
-            ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lastInputInfo))
-            
-            # Get current tick count
-            millis_since_input = ctypes.windll.kernel32.GetTickCount() - lastInputInfo.dwTime
-            
-            # Handle wraparound (unlikely but possible every 49.7 days)
-            if millis_since_input < 0:
-                millis_since_input = 0
-            
+
+            class LASTINPUTINFO(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+            last_input_info = LASTINPUTINFO()
+            last_input_info.cbSize = ctypes.sizeof(LASTINPUTINFO)
+
+            ok = ctypes.windll.user32.GetLastInputInfo(ctypes.byref(last_input_info))
+            if not ok:
+                raise RuntimeError("GetLastInputInfo returned 0")
+
+            # Use unsigned arithmetic to avoid wraparound issues near 49.7 days.
+            tick_now = ctypes.windll.kernel32.GetTickCount()
+            millis_since_input = (tick_now - last_input_info.dwTime) & 0xFFFFFFFF
+
             return millis_since_input / 1000.0  # Convert to seconds
-        
+
         except Exception as e:
             logger.warning(f"Failed to get last input time: {e}. Assuming active.")
             return 0.0
@@ -200,10 +199,10 @@ class ActivityMonitor:
         return self.current_status == IdleStatus.IDLE
     
     def queue_request(self, request_id: str, request_data: dict) -> bool:
-        """Queue a request if not idle. Returns True if queued, False if accepted immediately."""
+        """Queue a request if not idle. Returns True if queued, False otherwise."""
         if self.is_idle():
             return False  # Accepted immediately
-        
+
         if len(self.request_queue) < self.request_queue.maxlen:
             self.request_queue.append({
                 "request_id": request_id,
@@ -212,9 +211,9 @@ class ActivityMonitor:
             })
             logger.info(f"Queued request {request_id}. Queue depth: {len(self.request_queue)}")
             return True
-        else:
-            logger.warning(f"Request queue full ({self.request_queue.maxlen}). Rejecting request {request_id}")
-            return None  # Queue full
+
+        logger.warning(f"Request queue full ({self.request_queue.maxlen}). Rejecting request {request_id}")
+        return False
     
     def get_queued_request(self) -> Optional[dict]:
         """Dequeue next request (when idle and available)."""

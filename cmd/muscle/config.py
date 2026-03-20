@@ -23,7 +23,8 @@ class Config:
     # Hugging Face Model Settings
     hf_model_id: str
     hf_device: str
-    hf_dtype: str  # "float16" or "float32"
+    hf_dtype: str       # "float16" or "float32"
+    hf_quantize: str    # "none", "4bit", or "8bit"
     hf_max_tokens: int
     hf_temperature: float
     hf_top_k: int
@@ -64,9 +65,10 @@ class Config:
             ollama_temperature=float(os.getenv("OLLAMA_TEMPERATURE", "0.7")),
             
             # Hugging Face settings
-            hf_model_id=os.getenv("HF_MODEL_ID", "NousResearch/Hermes-2.5-Mistral-7B"),
+            hf_model_id=os.getenv("HF_MODEL_ID", "Qwen/Qwen2.5-Coder-7B-Instruct"),
             hf_device=os.getenv("HF_DEVICE", "cuda"),
             hf_dtype=os.getenv("HF_DTYPE", "float16"),
+            hf_quantize=os.getenv("HF_QUANTIZE", "none").lower().strip(),
             hf_max_tokens=int(os.getenv("HF_MAX_TOKENS", "1024")),
             hf_temperature=float(os.getenv("HF_TEMPERATURE", "0.7")),
             hf_top_k=int(os.getenv("HF_TOP_K", "50")),

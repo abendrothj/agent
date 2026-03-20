@@ -32,16 +32,17 @@ cd cmd\muscle
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-python download_model.py --model-id NousResearch/Hermes-2.5-Mistral-7B
+python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Coder-7B-Instruct'); print('Tokenizer cached')"
 python main.py
 ```
 
 ## Required .env Settings
 
 ```env
-HF_MODEL_ID=NousResearch/Hermes-2.5-Mistral-7B
+HF_MODEL_ID=Qwen/Qwen2.5-Coder-7B-Instruct
 HF_DEVICE=cuda
 HF_DTYPE=float16
+HF_QUANTIZE=4bit
 HF_MAX_TOKENS=1024
 HF_TEMPERATURE=0.7
 HF_TOP_K=50

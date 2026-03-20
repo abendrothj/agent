@@ -67,23 +67,24 @@ class MuscleStub(object):
 def add_MuscleServicer_to_server(servicer: MuscleServicer, server: grpc.aio.Server):
     """Register Muscle servicer with gRPC server."""
     rpc_method_handlers = {
-        'GenerateResponse': grpc.aio.stream_stream_rpc_method_handler(
+        # GenerateResponse is unary request -> streaming response.
+        'GenerateResponse': grpc.unary_stream_rpc_method_handler(
             servicer.GenerateResponse,
             request_deserializer=muscle_pb2.PromptRequest.FromString,
             response_serializer=muscle_pb2.TokenResponse.SerializeToString,
         ),
-        'Health': grpc.aio.unary_unary_rpc_method_handler(
+        'Health': grpc.unary_unary_rpc_method_handler(
             servicer.Health,
             request_deserializer=muscle_pb2.HealthRequest.FromString,
             response_serializer=muscle_pb2.HealthResponse.SerializeToString,
         ),
-        'GetActivityStatus': grpc.aio.unary_unary_rpc_method_handler(
+        'GetActivityStatus': grpc.unary_unary_rpc_method_handler(
             servicer.GetActivityStatus,
             request_deserializer=muscle_pb2.ActivityStatusRequest.FromString,
             response_serializer=muscle_pb2.ActivityStatusResponse.SerializeToString,
         ),
     }
-    
+
     generic_handler = grpc.method_handlers_generic_handler(
         'muscle.api.Muscle',
         rpc_method_handlers

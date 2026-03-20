@@ -105,6 +105,7 @@ async def main():
             model_id=config.hf_model_id,
             device=config.hf_device,
             dtype=config.hf_dtype,
+            quantize=config.hf_quantize,
             max_tokens=config.hf_max_tokens,
             temperature=config.hf_temperature,
             top_k=config.hf_top_k,

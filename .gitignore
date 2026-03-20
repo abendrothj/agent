@@ -1,0 +1,19 @@
+**/venv/
+
+# Local environment secrets
+.env
+
+# Python cache/build artifacts
+**/__pycache__/
+*.py[cod]
+
+# Runtime outputs
+cmd/muscle/logs/
+
+# Local cert material (do not commit plaintext keys/certs)
+cmd/muscle/certs/
+*.key
+
+# Secure transfer working output (keep encrypted bundle/scripts trackable)
+secure_transfer/decrypted-certs/
+secure_transfer/*.zip
