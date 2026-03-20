@@ -174,3 +174,45 @@ MODE=shutdown ./deployments/pi/scripts/muscle_off.sh
   - deployments/pi/scripts/muscle_wait_ready.sh
   - deployments/pi/scripts/muscle_off.sh
 
+## Manual CD for Pi Brain Services
+
+A dedicated manual workflow deploys only Pi brain services in this monorepo.
+
+Workflow file:
+
+- .github/workflows/pi-brain-manual-cd.yml
+
+Deploy script used by the workflow:
+
+- deployments/pi/scripts/deploy_brain_update.sh
+
+Default deployed services:
+
+- vault
+- api
+- shadow
+- watchdog
+- sandbox-agent
+- cloudflared
+
+Infrastructure services (postgres/redis/neo4j/prometheus/grafana) are intentionally not in the default list.
+
+### Trigger in GitHub Actions
+
+1. Open `Pi Brain Manual CD` in Actions.
+2. Click `Run workflow`.
+3. Set inputs:
+  - `ref`: branch/tag/SHA to deploy
+  - `allow_dirty`: keep `false` unless you intentionally deploy from a dirty runner checkout
+  - `services`: space-separated service names (defaults are safe)
+
+### Required Runner Labels
+
+Use a self-hosted runner on the Pi with labels:
+
+- self-hosted
+- linux
+- pi
+- brain
+
+

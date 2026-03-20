@@ -1,0 +1,48 @@
+name: Pi Brain Manual CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to deploy (branch, tag, or commit SHA)"
+        required: true
+        default: "main"
+      allow_dirty:
+        description: "Allow deployment when runner working tree is dirty"
+        type: boolean
+        required: true
+        default: false
+      services:
+        description: "Space-separated compose services to deploy"
+        required: true
+        default: "vault api shadow watchdog sandbox-agent cloudflared"
+
+concurrency:
+  group: pi-brain-manual-cd
+  cancel-in-progress: false
+
+jobs:
+  deploy-pi-brain:
+    name: Deploy Pi Brain Services
+    runs-on:
+      - self-hosted
+      - linux
+      - pi
+      - brain
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Make deploy script executable
+        run: chmod +x deployments/pi/scripts/deploy_brain_update.sh
+
+      - name: Run deploy script
+        env:
+          REPO_PATH: ${{ github.workspace }}
+          DEPLOY_REF: ${{ inputs.ref }}
+          ALLOW_DIRTY: ${{ inputs.allow_dirty }}
+          SERVICES: ${{ inputs.services }}
+        run: deployments/pi/scripts/deploy_brain_update.sh
