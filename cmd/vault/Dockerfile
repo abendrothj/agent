@@ -6,6 +6,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     postgresql-client \
     redis-tools \
+    git \
+    ssh \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

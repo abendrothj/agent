@@ -102,6 +102,14 @@ services:
       CERT_FILE: /run/certs/client.crt
       KEY_FILE: /run/certs/client.key
       CA_CERT: /run/certs/muscle.crt
+      # Git autonomy identity
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_USERNAME: ${GITHUB_USERNAME:-teammate-agent}
+      GITHUB_EMAIL: ${GITHUB_EMAIL:-agent@teammate.local}
+      AGENT_GIT_NAME: ${AGENT_GIT_NAME:-teammate-agent}
+      AGENT_REPO: ${AGENT_REPO:-}      # "owner/repo" for self-modification PRs
+      AUTONOMY_INTERVAL_SECONDS: ${AUTONOMY_INTERVAL_SECONDS:-7200}
+      GIT_IDENTITY_DIR: /run/git-identity
       LOG_LEVEL: INFO
     ports:
       - "50051:50051"
@@ -109,6 +117,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/teammate-vault/certs:/run/certs:ro
+      - git_identity:/run/git-identity   # persists the agent's SSH keypair
     networks:
       - vault_net
     depends_on:
@@ -118,6 +127,31 @@ services:
         condition: service_healthy
       memory_store:
         condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../..
+      dockerfile: cmd/api/Dockerfile
+    container_name: pi_api
+    environment:
+      VAULT_HOST: vault
+      VAULT_PORT: 50051
+      CERT_FILE: /run/certs/client.crt
+      KEY_FILE: /run/certs/client.key
+      CA_CERT: /run/certs/muscle.crt
+      API_KEY: ${API_KEY:-}      # Leave blank to disable auth, or set in .env
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      LOG_LEVEL: INFO
+    ports:
+      - "8080:8080"
+    volumes:
+      - /opt/teammate-vault/certs:/run/certs:ro
+    networks:
+      - vault_net
+    depends_on:
+      vault:
+        condition: service_started
     restart: unless-stopped
 
   shadow:
@@ -209,7 +243,33 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
-
+  # Cloudflare Tunnel — exposes the API gateway to the public internet so
+  # Slack can reach it without port-forwarding or a static IP.
+  #
+  # Two modes:
+  #   Named tunnel (recommended): set CLOUDFLARE_TUNNEL_TOKEN in .env
+  #                               then run: cloudflared tunnel login
+  #                               URL is stable and customisable.
+  #   Quick tunnel (zero-config): leave CLOUDFLARE_TUNNEL_TOKEN blank.
+  #                               URL is random (*.trycloudflare.com),
+  #                               printed in: docker logs pi_cloudflared | grep trycloudflare
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: pi_cloudflared
+    command: >
+      sh -c '
+        if [ -n "$$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+          cloudflared tunnel run --token $$CLOUDFLARE_TUNNEL_TOKEN;
+        else
+          cloudflared tunnel --url http://api:8080;
+        fi'
+    environment:
+      CLOUDFLARE_TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    networks:
+      - vault_net
+    depends_on:
+      - api
+    restart: unless-stopped
   # ── Observability ───────────────────────────────────────────────────────────
 
   prometheus:
@@ -254,6 +314,8 @@ volumes:
   teammate_memory:
   prometheus_data:
   grafana_data:
+  git_identity:      # persists the agent's SSH keypair across container restarts
+  git_identity:      # persists the agent's SSH keypair across container restarts
 
 networks:
   vault_net:

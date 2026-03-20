@@ -81,9 +81,32 @@ class MuscleServicer(muscle_pb2_grpc.MuscleServicer):
         start_time = time.time()
         token_index = 0
         
+        # Extract InferenceConfig — sent by the Pi with affect-derived values.
+        # Fall back to model defaults if absent (e.g. Health checks, old callers).
+        cfg = request.config if request.HasField("config") else None
+        temperature = cfg.temperature if cfg and cfg.temperature > 0.0 else None
+        top_k       = cfg.top_k       if cfg and cfg.top_k       > 0   else None
+        top_p       = cfg.top_p       if cfg and cfg.top_p       > 0.0 else None
+        max_tokens  = cfg.max_tokens  if cfg and cfg.max_tokens  > 0   else None
+
+        logger.info(
+            f"[{session_id}] InferenceConfig: "
+            f"temperature={temperature or 'default'} "
+            f"top_p={top_p or 'default'} "
+            f"top_k={top_k or 'default'} "
+            f"max_tokens={max_tokens or 'default'}"
+        )
+        
         try:
-            # Stream tokens from HuggingFace model
-            async for token in self.hf_model.generate_stream(prompt, system_context):
+            # Stream tokens from HuggingFace model, using affect-derived sampling params
+            async for token in self.hf_model.generate_stream(
+                prompt,
+                system_context,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            ):
                 token_index += 1
                 self.total_tokens_generated += 1
                 

@@ -14,3 +14,7 @@ langchain-core>=0.2.0
 
 # Neo4j — real-time graph writes to memory_store container
 neo4j>=5.0.0
+
+# Git autonomy — autonomous repo discovery, contribution, PR submission
+gitpython>=3.1.40
+httpx>=0.27.0

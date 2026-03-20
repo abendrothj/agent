@@ -90,6 +90,14 @@ class GraphRAGClient:
                     "CREATE INDEX entity_name_idx IF NOT EXISTS "
                     "FOR (e:Entity) ON (e.name, e.type)"
                 )
+                await session.run(
+                    "CREATE INDEX pr_id_idx IF NOT EXISTS "
+                    "FOR (p:PR) ON (p.pr_id)"
+                )
+                await session.run(
+                    "CREATE INDEX pr_outcome_idx IF NOT EXISTS "
+                    "FOR (p:PR) ON (p.outcome)"
+                )
 
             self._neo4j_available = True
             logger.info(f"Neo4j connected at {self.NEO4J_URI}")
@@ -239,4 +247,107 @@ class GraphRAGClient:
             SET r += $meta
             """,
             {"src": source_id, "tgt": target_id, "meta": meta},
+        )
+
+    # ── PR lifecycle tracking ────────────────────────────────────────────────
+    # These methods form the agent's contribution memory.  Every PR it
+    # submits is written as a :PR node; every outcome (merged/rejected/commented)
+    # updates that node.  RepoSelector reads this to improve future targeting.
+
+    async def record_pr_submitted(
+        self,
+        pr_id: str,                 # unique key, e.g. "owner/repo#42"
+        repo_full_name: str,
+        pr_number: int,
+        pr_url: str,
+        title: str,
+        language: str,
+        branch: str,
+        is_self_modification: bool,
+        issue_title: str = "",
+        topics: Optional[List[str]] = None,
+    ):
+        """Write a :PR node the moment the pull request is opened."""
+        await self._neo4j_write(
+            """
+            MERGE (p:PR {pr_id: $pr_id})
+            SET p.repo           = $repo,
+                p.pr_number      = $pr_number,
+                p.url            = $url,
+                p.title          = $title,
+                p.language       = $language,
+                p.branch         = $branch,
+                p.self_mod       = $self_mod,
+                p.issue_title    = $issue_title,
+                p.outcome        = 'open',
+                p.submitted_at   = timestamp()
+            WITH p
+            UNWIND $topics AS topic
+            MERGE (t:Topic {name: topic})
+            MERGE (p)-[:RELATES_TO]->(t)
+            """,
+            {
+                "pr_id":      pr_id,
+                "repo":       repo_full_name,
+                "pr_number":  pr_number,
+                "url":        pr_url,
+                "title":      title,
+                "language":   language,
+                "branch":     branch,
+                "self_mod":   is_self_modification,
+                "issue_title": issue_title,
+                "topics":     topics or [],
+            },
+        )
+        logger.info(f"[graph] PR submitted recorded: {pr_id}")
+
+    async def record_pr_outcome(
+        self,
+        pr_id: str,
+        outcome: str,           # "merged" | "closed" | "commented"
+        feedback: str = "",
+    ):
+        """
+        Update the :PR node with the final outcome.
+        Called by the AutonomyLoop when it polls outstanding PRs.
+        This is the core learning signal: merged = agent got something right.
+        """
+        await self._neo4j_write(
+            """
+            MATCH (p:PR {pr_id: $pr_id})
+            SET p.outcome      = $outcome,
+                p.feedback     = $feedback,
+                p.resolved_at  = timestamp()
+            """,
+            {"pr_id": pr_id, "outcome": outcome, "feedback": feedback},
+        )
+        logger.info(f"[graph] PR outcome recorded: {pr_id} → {outcome}")
+
+        # If rejected, create a failure entity so find_failure_patterns picks it up
+        if outcome == "closed":
+            await self._neo4j_write(
+                """
+                MATCH (p:PR {pr_id: $pr_id})
+                MERGE (f:Entity {
+                    id:   $pr_id + '_rejection',
+                    type: 'rejected',
+                    name: 'PR rejected: ' + p.title
+                })
+                SET f.description = $feedback
+                MERGE (p)-[:CAUSED]->(f)
+                """,
+                {"pr_id": pr_id, "feedback": feedback},
+            )
+
+    async def get_open_prs(self) -> List[Dict[str, Any]]:
+        """Return all :PR nodes the agent has submitted that are still open."""
+        return await self.neo4j_query(
+            """
+            MATCH (p:PR {outcome: 'open'})
+            RETURN p.pr_id     AS pr_id,
+                   p.repo      AS repo,
+                   p.pr_number AS pr_number,
+                   p.self_mod  AS self_mod
+            ORDER BY p.submitted_at ASC
+            """
         )

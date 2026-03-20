@@ -7,11 +7,27 @@ import asyncio
 from typing import Optional, Tuple
 from datetime import datetime
 import os
+import sys
+from pathlib import Path
 
+from internal.affect import engine as affect_engine
+from internal.affect.store import AffectStore
 from internal.memory.ledger.store import LedgerStore
+
+# Proto stubs
+_PROTO_DIR = Path(__file__).resolve().parent.parent.parent / "internal" / "api"
+if str(_PROTO_DIR) not in sys.path:
+    sys.path.insert(0, str(_PROTO_DIR))
+
+import muscle_pb2        # noqa: E402
+import muscle_pb2_grpc  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Static base temperature — affect state modulates around this
+_BASE_TEMPERATURE = float(os.getenv("BASE_TEMPERATURE", "0.7"))
+_BASE_TOP_P       = float(os.getenv("BASE_TOP_P",       "0.9"))
 
 
 class SandboxService:
@@ -29,15 +45,15 @@ class SandboxService:
     GRPC_PORT = int(os.getenv("SANDBOX_GRPC_PORT", "50055"))
     GRPC_HOST = os.getenv("SANDBOX_GRPC_HOST", "0.0.0.0")
     
-    def __init__(self):
+    def __init__(self, affect_store: Optional[AffectStore] = None):
         self.ledger: Optional[LedgerStore] = None
-        self.muscle_client = None  # Will be gRPC client to Muscle
+        self.muscle_client = None  # gRPC stub to Muscle (set during initialize)
+        self._affect = affect_store
     
     async def initialize(self):
         """Initialize Sandbox services"""
         logger.info("Initializing Sandbox Service...")
         
-        # Connect to ledger for logging
         self.ledger = LedgerStore(
             db_host=self.DB_HOST,
             db_port=self.DB_PORT,
@@ -48,7 +64,8 @@ class SandboxService:
         await self.ledger.connect()
         
         logger.info(f"Sandbox connecting to Muscle at {self.MUSCLE_HOST}:{self.MUSCLE_PORT}")
-        # In production: initialize gRPC client to Muscle with mTLS
+        # mTLS channel to Muscle — stubs init here in production
+        # self.muscle_client = muscle_pb2_grpc.MuscleStub(channel)
         
         logger.info("Sandbox Service initialized successfully")
     
@@ -58,7 +75,43 @@ class SandboxService:
         if self.ledger:
             await self.ledger.disconnect()
         logger.info("Sandbox Service shut down")
-    
+
+    # ── Affect-aware InferenceConfig builder ──────────────────────────────────
+
+    async def _build_inference_config(
+        self,
+        base_temperature: float = _BASE_TEMPERATURE,
+        base_top_p: float = _BASE_TOP_P,
+        max_tokens: int = 1024,
+    ) -> muscle_pb2.InferenceConfig:
+        """
+        Build the InferenceConfig for a Muscle call, with temperature and
+        top_p derived from the agent's current affective state.
+
+        If the affect store is unavailable, falls back to static base values
+        so calls always succeed.
+        """
+        state = await self._affect.read_state() if self._affect else None
+
+        if state:
+            temperature = affect_engine.compute_temperature(state, base_temperature)
+            top_p       = affect_engine.compute_top_p(state, base_top_p)
+            params      = affect_engine.summarise_inference_params(state, base_temperature)
+            logger.info(f"[sandbox] inference params: {params['reasoning']}")
+        else:
+            temperature = base_temperature
+            top_p       = base_top_p
+
+        return muscle_pb2.InferenceConfig(
+            temperature=temperature,
+            top_p=top_p,
+            top_k=40,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+
+    # ── Muscle call ───────────────────────────────────────────────────────────
+
     async def run_dry_op(
         self,
         request_id: str,
@@ -67,43 +120,62 @@ class SandboxService:
         max_tokens: int = 1024,
     ) -> Tuple[str, dict]:
         """
-        Execute prompt in sandbox (unmetered, no approval needed)
-        
+        Execute prompt in sandbox with affect-derived inference parameters.
         Returns: (output, metrics)
         """
-        
         start_ms = int(datetime.utcnow().timestamp() * 1000)
         
         try:
-            # Call Muscle service via gRPC (placeholder)
-            output = f"[DRY-RUN] Response to: {prompt[:50]}..."
-            
+            config = await self._build_inference_config(max_tokens=max_tokens)
+
+            if self.muscle_client:
+                # Real Muscle call — stream tokens and collect
+                muscle_request = muscle_pb2.PromptRequest(
+                    session_id=request_id,
+                    prompt=prompt,
+                    system_context=system_context,
+                    config=config,
+                    action_intent="code_gen",
+                )
+                output_tokens = []
+                async for token_resp in self.muscle_client.GenerateResponse(muscle_request):
+                    if token_resp.status == "error":
+                        raise RuntimeError(token_resp.error_msg)
+                    if token_resp.token:
+                        output_tokens.append(token_resp.token)
+                output = "".join(output_tokens)
+            else:
+                # Stub path (muscle client not yet connected)
+                output = f"[DRY-RUN] Response to: {prompt[:50]}..."
+
             end_ms = int(datetime.utcnow().timestamp() * 1000)
             duration_ms = end_ms - start_ms
             
             metrics = {
                 "duration_ms": duration_ms,
-                "tokens_generated": int(len(output.split()) * 1.3),  # Estimate
-                "gpu_memory_mb": 2048,  # Placeholder
+                "tokens_generated": int(len(output.split()) * 1.3),
+                "gpu_memory_mb": 2048,
                 "success": True,
+                "temperature_used": config.temperature,
+                "top_p_used": config.top_p,
             }
             
-            # Log execution
             await self.ledger.write_entry(
                 action_type="execute",
                 actor_id="sandbox",
                 request_id=request_id,
-                details=f"Dry-run executed: {duration_ms}ms",
+                details=f"Dry-run executed: {duration_ms}ms, temp={config.temperature}",
                 metadata=metrics,
             )
             
-            logger.info(f"Dry-run completed for {request_id}")
+            logger.info(
+                f"Dry-run completed for {request_id} — "
+                f"temp={config.temperature} top_p={config.top_p}"
+            )
             return output, metrics
         
         except Exception as e:
             logger.error(f"Dry-run failed: {e}")
-            
-            # Log failure
             await self.ledger.write_entry(
                 action_type="rollback",
                 actor_id="sandbox",
@@ -111,7 +183,6 @@ class SandboxService:
                 details=f"Dry-run failed: {str(e)}",
                 metadata={"error": str(e)},
             )
-            
             raise
 
 
