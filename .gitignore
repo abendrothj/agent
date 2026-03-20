@@ -17,3 +17,4 @@ cmd/muscle/certs/
 # Secure transfer working output (keep encrypted bundle/scripts trackable)
 secure_transfer/decrypted-certs/
 secure_transfer/*.zip
+*.crt
