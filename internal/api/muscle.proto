@@ -17,6 +17,9 @@ service Muscle {
 
   // Health: Liveness check from Pi
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // GetActivityStatus: Pi reads current activity/queue state
+  rpc GetActivityStatus(ActivityStatusRequest) returns (ActivityStatusResponse);
 }
 
 // PromptRequest: Pi sends this to Muscle
@@ -75,6 +78,22 @@ message HealthResponse {
   string status = 2;           // "ready", "loading", "error"
   int64 uptime_seconds = 3;
   string model_loaded = 4;     // Which model is currently in memory
+}
+
+// ActivityStatusRequest: Pi requests current workstation activity status
+message ActivityStatusRequest {
+  string session_id = 1;
+}
+
+// ActivityStatusResponse: Muscle reports queue/activity signals
+message ActivityStatusResponse {
+  string idle_status = 1;           // "active", "transitioning", "idle"
+  int32 queue_depth = 2;
+  int32 queue_capacity = 3;
+  bool accepting_requests = 4;
+  float gpu_utilization_percent = 5;
+  int64 idle_duration_seconds = 6;
+  bool user_active = 7;
 }
 
 // ====================================================
