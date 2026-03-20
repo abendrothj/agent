@@ -9,8 +9,6 @@
 #   cp deployments/pi/.env.example deployments/pi/.env   # fill in real values
 #   docker compose --env-file deployments/pi/.env -f deployments/pi/docker-compose.yml up -d
 
-version: '3.8'
-
 services:
   # ── Infrastructure ──────────────────────────────────────────────────────────
 
@@ -53,7 +51,8 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
   memory_store:
@@ -72,9 +71,10 @@ services:
       - vault_net
     healthcheck:
       test: ["CMD", "neo4j", "status"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s    # JVM startup on Pi takes 60-90s
     restart: unless-stopped
 
   # ── Pi Services ─────────────────────────────────────────────────────────────
