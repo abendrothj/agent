@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+package vault.api;
+
+option go_package = "github.com/teammate/internal/api";
+
+// VaultService: Orchestrator & Decision Engine on Pi (Raspberry Pi)
+// ==================================================================
+// The Vault receives processing requests from the API (Mac/iPhone) and:
+// 1. Routes reasoning to Win11 Muscle (stateless)
+// 2. Validates & signs responses (cryptographic approval)
+// 3. Routes code to Shadow (dry-run validation)
+// 4. Executes approved actions (GitHub, filesystem, etc.)
+// 5. Manages all secrets, rate limits, audit logs
+
+service Vault {
+  // ProcessPrompt: Main entry point for agent requests
+  // Returns: Either direct response (Tier 1/2) or PR/action for approval
+  rpc ProcessPrompt(VaultPromptRequest) returns (VaultResponse);
+
+  // ApproveAction: Sign & execute (rarely needed; most auto-approve in permissive mode)
+  rpc ApproveAction(ApprovalRequest) returns (ExecutionResponse);
+
+  // QueryPolicy: Get current governance state
+  rpc QueryPolicy(PolicyQueryRequest) returns (PolicyState);
+
+  // Health: Watchdog liveness check
+  rpc Health(HealthCheck) returns (HealthStatus);
+}
+
+// VaultPromptRequest: Public API sends this to Vault (routed from Mac/iPhone)
+message VaultPromptRequest {
+  string user_id = 1;              // Who is asking (for rate-limiting)
+  string session_id = 2;           // Request trace ID
+  string prompt = 3;               // The actual query
+  string domain = 4;               // "coding", "research", "writing", etc.
+  RiskTierEstimate tier = 5;       // Suggested tier (Vault may override)
+  map<string, string> metadata = 6; // Custom context (file path, etc.)
+}
+
+enum RiskTierEstimate {
+  TIER_1 = 0;  // Discovery only (read, search, diff)
+  TIER_2 = 1;  // Sandbox (build, test, lint)
+  TIER_3 = 2;  // Production (deploy, merge, tag)
+  TIER_4 = 3;  // Infrastructure (firewall, iam, secrets)
+}
+
+// VaultResponse: What Vault returns
+message VaultResponse {
+  ResponseType type = 1;           // "direct", "pr_proposed", "action_pending"
+  string response_id = 2;          // For tracking
+  string content = 3;              // The actual response text
+  RiskTierEstimate tier_classified = 4; // What Vault classified it as
+  ApprovalState approval = 5;      // Current approval state
+  ActionMetadata action = 6;       // If action is proposed
+  string error = 7;                // If error occurred
+}
+
+enum ResponseType {
+  DIRECT = 0;            // Immediate response (no approval needed)
+  PR_PROPOSED = 1;       // PR created, awaiting Shadow + merge
+  ACTION_PENDING = 2;    // Action proposed, awaiting approval
+  ERROR = 3;
+}
+
+enum ApprovalState {
+  UNKNOWN = 0;
+  APPROVED = 1;
+  PENDING_SHADOW = 2;    // Waiting for Shadow validation
+  PENDING_HUMAN = 3;     // Would need human but permissive mode skips
+  REJECTED = 4;
+  EXECUTED = 5;
+}
+
+// ActionMetadata: Details of proposed action
+message ActionMetadata {
+  string action_type = 1;           // "code_commit", "file_write", "github_pr", etc.
+  string description = 2;            // Human-readable action
+  repeated string affected_files = 3; // What files/systems affected
+  string risk_level = 4;             // "low", "medium", "high"
+  string shadow_pr_link = 5;        // Link to Shadow dry-run PR
+}
+
+// ApprovalRequest: Manually trigger action approval (rare in permissive mode)
+message ApprovalRequest {
+  string response_id = 1;          // Which response to approve
+  string approver_signature = 2;   // Cryptographic signature (if needed)
+  string reason = 3;               // Why approving
+}
+
+// ExecutionResponse: Result of executing an action
+message ExecutionResponse {
+  bool success = 1;
+  string execution_id = 2;
+  string result = 3;               // Output of the action
+  string github_url = 4;           // If PR created
+  repeated string logs = 5;        // Audit trail
+  string error = 6;                // If failed
+}
+
+// PolicyQueryRequest: Ask Vault about current policy state
+message PolicyQueryRequest {
+  string query_type = 1;           // "rate_limit", "tier_config", "self_mod_count", etc.
+  string user_id = 2;              // Whose policy to query
+}
+
+// PolicyState: Current governance state
+message PolicyState {
+  int32 changes_today = 1;         // Self-mods done today
+  int32 max_changes_per_day = 2;   // Limit
+  int32 tier_3_pending = 3;        // Tier 3 actions awaiting Shadow
+  int32 tier_4_pending = 4;        // Tier 4 actions awaiting approval
+  string last_update = 5;          // ISO 8601 timestamp
+  map<string, string> active_policies = 6; // Current policy settings
+}
+
+// HealthCheck: Periodic liveness from Watchdog
+message HealthCheck {
+  string watchdog_id = 1;
+  int64 timestamp = 2;
+}
+
+// HealthStatus: Vault responds
+message HealthStatus {
+  bool healthy = 1;
+  string status = 2;               // "ready", "degraded", "shutdown"
+  int64 uptime_seconds = 3;
+  int32 active_sessions = 4;
+  string last_decision = 5;        // Timestamp of last action
+}
+
+// ====================================================
+// VAULT DECISION FLOW:
+// ====================================================
+// 1. Receive VaultPromptRequest from API
+// 2. Classify RiskTier using internal/core/risk classifier
+// 3. Route to Muscle (Win11) for reasoning if needed
+// 4. Validate Muscle response (check for prompt injection, etc.)
+// 5. If Tier 1-2: Return directly
+// 6. If Tier 3: Route to Shadow (dry-run), wait for approval, merge PR
+// 7. If Tier 4: Block or require explicit signature
+// 8. Execute approved actions
+// 9. Log everything to observability/logs

@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package shadow.api;
+
+option go_package = "github.com/teammate/internal/api";
+
+// ShadowService: Dry-Run Validator on Pi (Raspberry Pi)
+// =====================================================
+// Shadow runs proposed code changes WITHOUT executing them for real.
+// It predicts outcomes: "If we merge this PR, will the agent still work?"
+// Uses: static analysis, symbolic execution, test runs in sandbox.
+// Result: Vault uses this to decide whether to merge.
+
+service Shadow {
+  // ValidateProposal: Dry-run a code change before merge
+  // Returns: Predicted outcome, confidence, any issues found
+  rpc ValidateProposal(ValidationRequest) returns (ValidationResponse);
+
+  // RecordOutcome: After execution, log what actually happened
+  // Shadow learns by comparing prediction vs. reality
+  rpc RecordOutcome(OutcomeReport) returns (OutcomeRecorded);
+
+  // QueryReadiness: Is new Muscle version ready for 24h observation period?
+  rpc QueryReadiness(ReadinessQuery) returns (ReadinessStatus);
+}
+
+// ValidationRequest: Vault sends PR content to Shadow
+message ValidationRequest {
+  string session_id = 1;                    // Trace ID
+  string muscle_version = 2;                // Which Muscle version proposed this
+  string pr_title = 3;                      // PR title
+  repeated FileDiff file_diffs = 4;         // What code changed
+  string test_command = 5;                  // How to validate (e.g., "pytest")
+  int32 timeout_seconds = 6;                // Max time to spend validating
+  ValidationPhase phase = 7;                // What stage of validation
+  map<string, string> context = 8;          // Current agent state
+}
+
+enum ValidationPhase {
+  PHASE_UNKNOWN = 0;
+  PHASE_STATIC_ANALYSIS = 1;    // Check syntax, type safety
+  PHASE_SYMBOLIC_EXECUTION = 2; // Trace through code paths
+  PHASE_SANDBOX_TEST = 3;       // Run in isolated test environment
+  PHASE_INTEGRATION = 4;        // Test against mock external APIs
+}
+
+// FileDiff: A single file change in the PR
+message FileDiff {
+  string file_path = 1;
+  string operation = 2;          // "create", "modify", "delete"
+  string before_content = 3;     // Original content (if modify/delete)
+  string after_content = 4;      // New content (if create/modify)
+  repeated string risky_patterns = 5; // Red flags found (e.g., "rm -rf", infinite loop)
+}
+
+// ValidationResponse: Shadow's verdict on the proposal
+message ValidationResponse {
+  string validation_id = 1;
+  bool is_safe = 2;              // Can Vault merge this?
+  float confidence = 3;          // 0.0-1.0, how confident Shadow is
+  ValidationType validation_type = 4;
+  repeated ValidationIssue issues = 5;  // Problems found
+  repeated string test_results = 6;     // Output from test_command
+  PredictedOutcome prediction = 7;      // What will happen if merged
+  string reasoning = 8;          // Human-readable explanation
+  string shadow_pr_url = 9;      // Link to the dry-run PR/branch
+}
+
+enum ValidationType {
+  VALIDATION_UNKNOWN = 0;
+  VALIDATION_PASSED = 1;         // No issues, safe to merge
+  VALIDATION_WARNING = 2;        // Suspicious but probably OK
+  VALIDATION_FAILED = 3;         // Critical issues, block merge
+}
+
+// ValidationIssue: Problem found during validation
+message ValidationIssue {
+  string severity = 1;           // "info", "warning", "error"
+  string category = 2;           // "infinite_loop", "unhandled_exception", "memory", etc.
+  string description = 3;        // What's wrong
+  string file_path = 4;
+  int32 line_number = 5;
+  string suggested_fix = 6;      // Optional fix
+}
+
+// PredictedOutcome: What Shadow thinks will happen post-merge
+message PredictedOutcome {
+  bool will_agent_still_work = 1;          // Core question
+  string predicted_behavior = 2;           // Description
+  float predicted_correctness = 3;         // 0.0-1.0
+  repeated string new_capabilities = 4;   // What the agent can now do
+  repeated string removed_capabilities = 5; // What it lost
+  repeated string side_effects = 6;        // Unexpected effects
+}
+
+// OutcomeReport: After Shadow validation period and/or execution
+// Used for continuous learning (Shadow vs. Reality)
+message OutcomeReport {
+  string validation_id = 1;      // Which validation this is about
+  string muscle_version = 2;
+  bool execution_succeeded = 3;  // Did the merged code work?
+  float actual_correctness = 4;  // 0.0-1.0, measured
+  repeated string actual_issues = 5;  // What actually broke
+  string feedback = 6;           // Observations for learning
+  int64 observation_duration_hours = 7; // How long we watched this
+}
+
+// OutcomeRecorded: Shadow confirms it recorded the outcome
+message OutcomeRecorded {
+  bool recorded = 1;
+  string log_id = 2;
+  float prediction_accuracy = 3; // How close was prediction to reality?
+  string status = 4;            // "new_data_recorded", "version_now_eligible"
+}
+
+// ReadinessQuery: Check if a Muscle version is ready for canary
+message ReadinessQuery {
+  string muscle_version = 1;
+  string status_type = 2;        // "validation_hours_remaining", "prediction_accuracy", "all"
+}
+
+// ReadinessStatus: Response about version readiness
+message ReadinessStatus {
+  bool is_canary_eligible = 1;        // Can move to production?
+  float hours_shadow_observed = 2;    // How many hours of Shadow data
+  float mean_prediction_accuracy = 3; // Mean accuracy drop (< 0.98 = not ready)
+  int32 issues_found = 4;             // Total issues in observation period
+  int32 issues_resolved = 5;          // How many were fixed
+  string recommendation = 6;          // "ready", "keep_monitoring", "update_needed"
+  string next_eligible_time = 7;      // ISO 8601 if not ready yet
+}
+
+// ====================================================
+// SHADOW VALIDATION STRATEGY:
+// ====================================================
+// 1. Static Analysis: Parse the PR, check for obvious errors
+// 2. Symbolic Execution: Trace code paths without executing
+// 3. Sandbox Test: Run the code in isolated environment w/ mock data
+// 4. Integration Test: Test against mocked external APIs
+// 5. Monitoring: After merge, watch real execution for 24h
+// 6. Learning: Compare predicted vs. actual outcomes
+//
+// Readiness Criteria for New Muscle Version:
+// - 24+ hours of Shadow observation
+// - Prediction accuracy >= 98%
+// - No critical failures
+// - Fewer issues over time (trend)
+// ====================================================

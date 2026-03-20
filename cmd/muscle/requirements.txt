@@ -1,0 +1,20 @@
+# Teammate Muscle Service Dependencies
+# Install with: pip install -r requirements.txt
+
+# gRPC & Protobuf
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+
+# Ollama Client
+ollama>=0.1.0
+
+# HTTP (async)
+httpx>=0.25.0
+
+# Configuration & Logging
+python-dotenv>=1.0.0
+loguru>=0.7.0
+
+# Utilities
+pydantic>=2.0.0
+cryptography>=41.0.0

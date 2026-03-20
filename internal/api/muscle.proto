@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package muscle.api;
+
+option go_package = "github.com/teammate/internal/api";
+
+// MuscleService: Stateless inference endpoint on Win11
+// ====================================================
+// The Muscle is a pure compute worker. It receives prompts and returns tokens.
+// NO state persistence, NO filesystem access, NO decision-making.
+// The Pi (Vault) controls all I/O and validation.
+
+service Muscle {
+  // GenerateResponse: Stream tokens from Pi prompt to Muscle
+  // The Pi sends the prompt once; Muscle streams token responses.
+  rpc GenerateResponse(PromptRequest) returns (stream TokenResponse);
+
+  // Health: Liveness check from Pi
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// PromptRequest: Pi sends this to Muscle
+message PromptRequest {
+  string session_id = 1;           // Trace ID (Pi-generated, not trusted)
+  string prompt = 2;                // The actual user query/context
+  string system_context = 3;        // System role (e.g., "You are a code generator")
+  repeated Message history = 4;     // Previous turns in conversation
+  InferenceConfig config = 5;       // Temperature, max_tokens, etc.
+  string action_intent = 6;         // ENUM: "reasoning", "code_gen", "analysis"
+  map<string, string> constraints = 7; // Governance hints (e.g., "max_self_mods": "5/day")
+}
+
+// Message: A turn in conversation history
+message Message {
+  string role = 1;        // "user" or "assistant"
+  string content = 2;     // The message text
+}
+
+// InferenceConfig: Parameters for Ollama inference
+message InferenceConfig {
+  float temperature = 1;      // 0.0-2.0, default 0.7
+  int32 top_k = 2;            // Nucleus sampling, default 40
+  float top_p = 3;            // Top-p sampling, default 0.9
+  int32 max_tokens = 4;       // Default 512
+  bool stream = 5;            // Always true for this RPC
+}
+
+// TokenResponse: Muscle streams these back to Pi
+message TokenResponse {
+  string token = 1;              // Single token or partial text chunk
+  int32 token_index = 2;         // Position in response
+  bool is_complete = 3;          // True when generation finished
+  ResponseMetadata metadata = 4; // Reasoning trace, confidence, etc.
+  string status = 5;             // "ok", "error", "timeout"
+  string error_msg = 6;          // If status != "ok"
+}
+
+// ResponseMetadata: Optional reasoning signals from Muscle
+message ResponseMetadata {
+  float confidence = 1;          // 0.0-1.0, subjective confidence in response
+  repeated string reasoning_steps = 2; // Internal reasoning (if available)
+  int32 tokens_used = 3;         // Total tokens generated
+  float inference_time_ms = 4;   // Time spent in Ollama
+  string model_name = 5;         // Which model was used
+}
+
+// HealthRequest: Watchdog pings Muscle liveness
+message HealthRequest {
+  string session_id = 1;
+}
+
+// HealthResponse: Muscle responds with status
+message HealthResponse {
+  bool healthy = 1;
+  string status = 2;           // "ready", "loading", "error"
+  int64 uptime_seconds = 3;
+  string model_loaded = 4;     // Which model is currently in memory
+}
+
+// ====================================================
+// SECURITY NOTES:
+// ====================================================
+// 1. Muscle NEVER initiates connections. Only responds to Pi.
+// 2. Muscle NEVER writes to filesystem. Only /tmp for inference cache.
+// 3. Muscle NEVER reads external files. Pi feeds all context via prompt.
+// 4. All credentials, decisions, actions are on Pi side.
+// 5. If Win11 is compromised, attacker only gets inference outputs.
+// 6. Pi validates all Muscle responses before acting on them.
