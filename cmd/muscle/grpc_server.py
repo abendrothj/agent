@@ -9,7 +9,10 @@ from loguru import logger
 import muscle_pb2
 import muscle_pb2_grpc
 from hf_model import HFModel
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from activity_monitor import ActivityMonitor
 
 
 class MuscleServicer(muscle_pb2_grpc.MuscleServicer):

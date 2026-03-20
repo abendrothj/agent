@@ -30,10 +30,13 @@ if [ ! -f "../../.env" ]; then
     echo "WARNING: .env file not found!"
     echo "Creating template..."
     cat > ../../.env << EOF
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=deepseek-r1:8b
-OLLAMA_MAX_TOKENS=1024
-OLLAMA_TEMPERATURE=0.7
+HF_MODEL_ID=NousResearch/Hermes-2.5-Mistral-7B
+HF_DEVICE=cuda
+HF_DTYPE=float16
+HF_MAX_TOKENS=1024
+HF_TEMPERATURE=0.7
+HF_TOP_K=50
+HF_TOP_P=0.9
 GRPC_PORT=50051
 GRPC_HOST=0.0.0.0
 CERT_FILE=./certs/muscle.crt
@@ -41,6 +44,10 @@ KEY_FILE=./certs/muscle.key
 CA_CERT=./certs/client.crt
 LOG_LEVEL=INFO
 LOG_FILE=./logs/muscle.log
+ACTIVITY_MONITORING_ENABLED=true
+GPU_THRESHOLD_PERCENT=30
+IDLE_THRESHOLD_SEC=300
+ACTIVITY_CHECK_INTERVAL_SEC=5
 EOF
     echo "Please edit .env file with correct paths, then run this script again."
     exit 1
@@ -55,13 +62,6 @@ fi
 
 # Create logs directory
 mkdir -p logs
-
-# Start Ollama in background (if not already running)
-if ! pgrep -f "ollama serve" > /dev/null; then
-    echo "Starting Ollama..."
-    ollama serve > /dev/null 2>&1 &
-    sleep 3
-fi
 
 # Start the Muscle service
 echo ""

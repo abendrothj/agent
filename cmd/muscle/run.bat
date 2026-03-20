@@ -30,10 +30,13 @@ if not exist "..\..\\.env" (
     echo WARNING: .env file not found!
     echo Creating template at ...\.env
     echo.
-    echo OLLAMA_HOST=http://localhost:11434 > ..\..\\.env
-    echo OLLAMA_MODEL=deepseek-r1:8b >> ..\..\\.env
-    echo OLLAMA_MAX_TOKENS=1024 >> ..\..\\.env
-    echo OLLAMA_TEMPERATURE=0.7 >> ..\..\\.env
+    echo HF_MODEL_ID=NousResearch/Hermes-2.5-Mistral-7B > ..\..\\.env
+    echo HF_DEVICE=cuda >> ..\..\\.env
+    echo HF_DTYPE=float16 >> ..\..\\.env
+    echo HF_MAX_TOKENS=1024 >> ..\..\\.env
+    echo HF_TEMPERATURE=0.7 >> ..\..\\.env
+    echo HF_TOP_K=50 >> ..\..\\.env
+    echo HF_TOP_P=0.9 >> ..\..\\.env
     echo GRPC_PORT=50051 >> ..\..\\.env
     echo GRPC_HOST=0.0.0.0 >> ..\..\\.env
     echo CERT_FILE=./certs/muscle.crt >> ..\..\\.env
@@ -41,6 +44,10 @@ if not exist "..\..\\.env" (
     echo CA_CERT=./certs/client.crt >> ..\..\\.env
     echo LOG_LEVEL=INFO >> ..\..\\.env
     echo LOG_FILE=./logs/muscle.log >> ..\..\\.env
+    echo ACTIVITY_MONITORING_ENABLED=true >> ..\..\\.env
+    echo GPU_THRESHOLD_PERCENT=30 >> ..\..\\.env
+    echo IDLE_THRESHOLD_SEC=300 >> ..\..\\.env
+    echo ACTIVITY_CHECK_INTERVAL_SEC=5 >> ..\..\\.env
     echo.
     echo Please edit .env file with correct paths, then run this script again.
     pause
@@ -57,14 +64,6 @@ if not exist "certs\muscle.crt" (
 
 REM Create logs directory if needed
 if not exist "logs" mkdir logs
-
-REM Start Ollama in background (if not already running)
-tasklist /FI "IMAGENAME eq ollama.exe" 2>NUL | find /I /N "ollama.exe">NUL
-if errorlevel 1 (
-    echo Starting Ollama...
-    start /B ollama serve > nul 2>&1
-    timeout /t 3 /nobreak
-)
 
 REM Start the Muscle service
 echo.

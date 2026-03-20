@@ -115,14 +115,14 @@ Before starting the Muscle service, pre-download the model to avoid delays:
 
 **Full Precision (Recommended for accuracy):**
 ```cmd
-python -c "from transformers import AutoModel, AutoTokenizer; model = AutoModel.from_pretrained('NousResearch/Hermes-2.5-Mistral-7B', torch_dtype='float16', device_map='auto'); print('Model cached successfully')"
+python -c "import torch; from transformers import AutoModelForCausalLM, AutoTokenizer; tok = AutoTokenizer.from_pretrained('NousResearch/Hermes-2.5-Mistral-7B'); model = AutoModelForCausalLM.from_pretrained('NousResearch/Hermes-2.5-Mistral-7B', torch_dtype=torch.float16, device_map='auto'); print('Model cached successfully')"
 ```
 
 **ALTERNATIVE - Quantized (Faster, Less VRAM):**
 If you want the model to run in less VRAM or faster:
 ```cmd
-pip install pip install bitsandbytes transformers 
-python -c "from transformers import BitsAndBytesConfig, AutoModel; config = BitsAndBytesConfig(load_in_8bit=True); model = AutoModel.from_pretrained('NousResearch/Hermes-2.5-Mistral-7B', quantization_config=config); print('Model cached successfully')"
+pip install bitsandbytes transformers
+python -c "import torch; from transformers import BitsAndBytesConfig, AutoModelForCausalLM; config = BitsAndBytesConfig(load_in_8bit=True); model = AutoModelForCausalLM.from_pretrained('NousResearch/Hermes-2.5-Mistral-7B', quantization_config=config, device_map='auto'); print('Model cached successfully')"
 ```
 
 **Storage Requirements:**
@@ -167,6 +167,8 @@ pip install -r requirements.txt
 
 ## Step 5: Generate mTLS Certificates (Muscle ↔ Pi Tunnel)
 
+### 5.1 Generate Self-Signed Certificates
+
 ```cmd
 # In C:\teammate-muscle\certs\ directory
 
@@ -181,7 +183,7 @@ openssl genrsa -out client.key 2048
 openssl req -new -x509 -key client.key -out client.crt -days 365 -subj "/CN=pi-vault"
 ```
 
-### 4.2 Share Certificates
+### 5.2 Share Certificates
 - **Pi gets:** `client.crt` (Muscle's public cert)
 - **Win11 keeps:** `muscle.key`, `muscle.crt`, `client.crt`
 
@@ -191,7 +193,7 @@ For now: create dummy files in `C:\teammate-muscle\certs\` (to be replaced later
 
 ## Step 6: Firewall Configuration
 
-### 5.1 Allow gRPC Port
+### 6.1 Allow gRPC Port
 1. Open Windows Defender Firewall → Advanced Settings
 2. Inbound Rules → New Rule
 3. Port: **50051** (gRPC default)
@@ -201,9 +203,9 @@ For now: create dummy files in `C:\teammate-muscle\certs\` (to be replaced later
    - If Pi IP is `192.168.1.50`:
      - Add condition: "Remote IP Address" = `192.168.1.50`
 
-### 5.2 Disable Outbound (Optional but Recommended)
+### 6.2 Disable Outbound (Optional but Recommended)
 1. Create Rule: Outbound, Deny, all ports EXCEPT:
-   - **443** (HTTPS, for Ollama model downloads)
+   - **443** (HTTPS, for Hugging Face model downloads)
    - **50051** (to Pi Vault)
    - **53** (DNS)
 
@@ -215,11 +217,11 @@ This prevents Muscle from exfiltrating data.
 
 **Why:** Restricts Muscle process to minimal permissions (filesystem read-only, network to Pi only).
 
-### 6.1 Create AppContainer
+### 7.1 Create AppContainer
 1. Download WAIL (Windows Application Isolation Layer) from: https://github.com/trailofbits/wail (or similar AppContainer tool)
-2. Or: Run Muscle in Docker (see Step 7 alternative)
+2. Or: Run Muscle in Docker (see Step 8 alternative)
 
-### 6.2 Run in Sandbox
+### 7.2 Run in Sandbox
 ```cmd
 # Using WAIL or similar
 run-isolated cmd /c "cd C:\teammate-muscle && python muscle.py"
@@ -233,11 +235,11 @@ run-isolated cmd /c "cd C:\teammate-muscle && python muscle.py"
 
 **If you prefer containerization:**
 
-### 7.1 Install Docker Desktop
+### 8.1 Install Docker Desktop
 1. Download from: https://www.docker.com/products/docker-desktop
 2. Install, enable WSL 2
 
-### 7.2 Build Container
+### 8.2 Build Container
 See `Dockerfile` in Phase 8 (Deployment). For now, use native Python.
 
 ---
@@ -287,7 +289,7 @@ ACTIVITY_CHECK_INTERVAL_SEC=5     # Monitor every 5 seconds
 
 The Muscle service can detect when you're actively using your PC (gaming, working) and automatically queue inference requests until you're idle. This prevents the agent from consuming GPU resources while you're busy.
 
-### 9.1 What It Does
+### 10.1 What It Does
 
 **Before Activity Detection:**
 - Agent requests arrive at any time
@@ -306,7 +308,7 @@ The Muscle service can detect when you're actively using your PC (gaming, workin
 - `⏳ Transitioning` — Recently became idle (< 5 min yet)
 - `💤 Idle` — Idle for 5+ min (requests accepted & processed)
 
-### 9.2 Configuration
+### 10.2 Configuration
 
 The `.env` settings are already added above. Adjust if needed:
 
@@ -317,7 +319,7 @@ The `.env` settings are already added above. Adjust if needed:
 | `IDLE_THRESHOLD_SEC` | 300 | 5 min idle before processing queued requests |
 | `ACTIVITY_CHECK_INTERVAL_SEC` | 5 | Poll every 5 seconds |
 
-### 9.3 Tuning
+### 10.3 Tuning
 
 **If agent works too much during light usage:**
 ```env
@@ -339,7 +341,7 @@ IDLE_THRESHOLD_SEC=120    # 2 minutes instead of 5
 ACTIVITY_MONITORING_ENABLED=false  # Disable queue stalling
 ```
 
-### 9.4 Logs
+### 10.4 Logs
 
 Monitor the queue and activity in real-time:
 
@@ -438,8 +440,8 @@ Watch for:
 | Issue | Fix |
 |-------|-----|
 | `nvidia-smi: command not found` | CUDA toolkit not in PATH; restart after install |
-| Ollama won't start | Check Windows Defender disabled for Ollama app; restart Ollama service |
-| Model download fails | Check internet; Ollama may need firewall rule for HTTPS (443) |
+| HF model load fails | Check internet, Hugging Face availability, and disk space in cache directory |
+| Model download fails | Check internet; allow HTTPS (443) for Hugging Face downloads |
 | gRPC connection timeout | Check firewall port 50051 open; verify Pi IP can resolve Win11 |
 | Low GPU utilization (< 20%) | Model may be running on CPU; check CUDA support for your model |
 | Inference very slow (> 10s/token) | 3060Ti should do ~10 tokens/sec; check thermal throttling (temps > 80°C) |
@@ -459,7 +461,7 @@ Once Win11 is ready:
 
 ## Security Reminders
 
-- ✅ **Ollama is localhost-only** by default (not exposed to network)
+- ✅ **Muscle service is LAN-local only** (not exposed to internet)
 - ✅ **mTLS certificates** secure Muscle ↔ Pi tunnel
 - ✅ **Firewall** restricts inbound to port 50051 + Pi IP
 - ✅ **No persistent state** — Muscle restarts cleanly each day
@@ -468,6 +470,6 @@ Once Win11 is ready:
 **Do NOT:**
 - ❌ Open port 50051 to the internet
 - ❌ Store credentials on Win11
-- ❌ Run Ollama.exe in unsafe container
+- ❌ Expose Hugging Face tokens or credentials on Win11
 - ❌ Trust any connection from non-Pi sources
 
