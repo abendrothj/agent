@@ -45,8 +45,6 @@ class VaultService:
     MFA_TIMEOUT_SECONDS = int(os.getenv("VAULT_MFA_TIMEOUT", "600"))
     TOKEN_TTL_HOURS = int(os.getenv("VAULT_TOKEN_TTL", "24"))
 
-    GRAPHRAG_INDEX_DIR = os.getenv("GRAPHRAG_INDEX_DIR", "./graphrag_index")
-
     def __init__(self):
         self.classifier = RiskClassifier()
         self.ledger: Optional[LedgerStore] = None
@@ -73,8 +71,8 @@ class VaultService:
         )
         await self.context.connect()
 
-        # GraphRAG long-term memory (gracefully degrades if index not built yet)
-        self.graph_client = GraphRAGClient(index_dir=self.GRAPHRAG_INDEX_DIR)
+        # Neo4j graph memory
+        self.graph_client = GraphRAGClient()
         await self.graph_client.initialize()
 
         # LangGraph vault — wires together all dependencies

@@ -33,8 +33,6 @@ class WatchdogService:
     LATENCY_SPIKE_THRESHOLD_MS = 5000
     GPU_THERMAL_CRITICAL = 85  # Celsius
     GPU_MEMORY_CRITICAL_MB = 512
-    
-    GRAPHRAG_INDEX_DIR = os.getenv("GRAPHRAG_INDEX_DIR", "./graphrag_index")
 
     def __init__(self):
         self.ledger: Optional[LedgerStore] = None
@@ -67,8 +65,8 @@ class WatchdogService:
         )
         await self.vector_client.connect()
 
-        # GraphRAG: failures become traversable graph entities
-        self.graph_client = GraphRAGClient(index_dir=self.GRAPHRAG_INDEX_DIR)
+        # Neo4j graph memory — failures become traversable graph entities
+        self.graph_client = GraphRAGClient()
         await self.graph_client.initialize()
 
         self.running = True

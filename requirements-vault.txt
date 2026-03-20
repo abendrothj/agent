@@ -12,11 +12,5 @@ langgraph>=0.2.0
 langgraph-checkpoint-postgres>=0.1.0
 langchain-core>=0.2.0
 
-# GraphRAG — relationship-aware long-term memory
-graphrag>=0.3.0
-networkx>=3.0
-graspologic>=3.0
-openai>=1.30.0
-
 # Neo4j — real-time graph writes to memory_store container
 neo4j>=5.0.0
