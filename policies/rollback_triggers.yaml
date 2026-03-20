@@ -1,0 +1,212 @@
+# Rollback Triggers & Auto-Recovery Rules
+# Watched by Watchdog service; triggers automatic rollback or manual escalation
+
+---
+# Global Rollback Policy
+global:
+  rollback_enabled: true
+  rollback_executor: "watchdog"
+  rollback_timeout_seconds: 300
+  alert_severity: "critical"
+  escalation_enabled: true
+  escalation_contacts: ["vault", "user:admin"]
+
+# Performance-Based Rollback Triggers
+performance:
+  - trigger_name: "high_error_rate"
+    enabled: true
+    condition: "error_rate > 0.10"
+    measurement_window_seconds: 300
+    samples_required: 10
+    action: "rollback"
+    severity: "critical"
+    description: "More than 10% of requests failing"
+    
+  - trigger_name: "p99_latency_spike"
+    enabled: true
+    condition: "p99_latency_ms > 5000"
+    measurement_window_seconds: 600
+    samples_required: 20
+    action: "rollback"
+    severity: "high"
+    description: "99th percentile latency exceeds 5s"
+    
+  - trigger_name: "mean_latency_increase"
+    enabled: true
+    condition: "mean_latency_increase_percent > 50"
+    measurement_window_seconds: 300
+    baseline_window_seconds: 3600
+    samples_required: 10
+    action: "rollback"
+    severity: "high"
+    description: "Mean latency increased >50% vs 1h baseline"
+
+  - trigger_name: "request_timeout_rate"
+    enabled: true
+    condition: "timeout_rate > 0.05"
+    measurement_window_seconds: 300
+    samples_required: 10
+    action: "rollback"
+    severity: "high"
+    description: "More than 5% of requests timing out"
+
+# Resource-Based Rollback Triggers
+resources:
+  - trigger_name: "gpu_memory_exhaustion"
+    enabled: true
+    condition: "gpu_memory_available_mb < 512"
+    measurement_window_seconds: 60
+    samples_required: 1
+    action: "throttle"  # Softer than rollback
+    severity: "medium"
+    recovery_action: "reduce_batch_size_50pct"
+    description: "GPU VRAM critically low"
+    
+  - trigger_name: "gpu_thermal_critical"
+    enabled: true
+    condition: "gpu_temp_c > 85"
+    measurement_window_seconds: 60
+    samples_required: 1
+    action: "rollback"
+    severity: "critical"
+    recovery_action: "restart_service"
+    description: "GPU temperature critical (>85°C)"
+    
+  - trigger_name: "cpu_overload"
+    enabled: true
+    condition: "cpu_usage_percent > 95"
+    measurement_window_seconds: 300
+    samples_required: 5
+    action: "rollback"
+    severity: "high"
+    description: "CPU utilization critical"
+    
+  - trigger_name: "memory_pressure_high"
+    enabled: true
+    condition: "available_memory_mb < 256"
+    measurement_window_seconds: 60
+    samples_required: 1
+    action: "throttle"
+    severity: "medium"
+    recovery_action: "reduce_batch_size_50pct"
+    description: "System RAM pressure high"
+
+# Semantic & Accuracy-Based Triggers
+accuracy:
+  - trigger_name: "semantic_drift_detection"
+    enabled: true
+    condition: "baseline_similarity < 0.70"
+    measurement_window_seconds: 600
+    samples_required: 10
+    action: "flag_for_review"
+    severity: "medium"
+    escalation: true
+    description: "Model output drifting from baseline (semantic)"
+    
+  - trigger_name: "accuracy_degradation"
+    enabled: true
+    condition: "accuracy_score < (baseline_accuracy * 0.90)"
+    measurement_window_seconds: 1800
+    samples_required: 20
+    action: "rollback"
+    severity: "high"
+    description: "Accuracy degraded >10% vs baseline"
+    
+  - trigger_name: "hallucination_detection"
+    enabled: true
+    condition: "hallucination_score > 0.20"
+    measurement_window_seconds: 600
+    samples_required: 10
+    action: "flag_for_review"
+    severity: "high"
+    escalation: true
+    description: "Model generating factually incorrect outputs (>20% rate)"
+
+# Canary Promotion Failure Triggers
+canary:
+  - trigger_name: "canary_success_rate_below_threshold"
+    enabled: true
+    condition: "canary_success_rate < tier_threshold"
+    measurement_window_seconds: 300
+    samples_required: 10
+    action: "rollback"
+    severity: "critical"
+    cache_rejection_24h: true
+    description: "Canary success rate below tier-specific threshold"
+    
+  - trigger_name: "canary_traffic_anomaly"
+    enabled: true
+    condition: "canary_error_rate_vs_stable_ratio > 2.0"
+    measurement_window_seconds: 600
+    samples_required: 20
+    action: "rollback"
+    severity: "high"
+    description: "Canary errors 2x higher than stable baseline"
+
+# Safety & Authorization Triggers
+safety:
+  - trigger_name: "approval_token_revoked"
+    enabled: true
+    condition: "approval_token_revocation_detected"
+    measurement_window_seconds: 1
+    samples_required: 1
+    action: "rollback"
+    severity: "critical"
+    description: "Approval token revoked by Vault"
+    
+  - trigger_name: "tier_4_rejection_cache_hit"
+    enabled: true
+    condition: "request_matches_tier4_rejection_24h_cache"
+    measurement_window_seconds: 1
+    samples_required: 1
+    action: "auto_reject"
+    severity: "critical"
+    cache_enforcement: "strict"
+    description: "Tier 4 rejection cache ignition; auto-block"
+
+# Watchdog-Triggered Recovery Actions
+recovery_actions:
+  rollback:
+    description: "Revert to previous stable version"
+    steps:
+      - "mark_version_as_bad"
+      - "activate_previous_checkpoint"
+      - "resume_traffic_from_stable"
+      - "write_retrospective"
+    timeout_seconds: 60
+    
+  throttle:
+    description: "Reduce request rate or batch size"
+    steps:
+      - "reduce_batch_size_50pct"
+      - "enable_request_queue"
+      - "monitor_recovery"
+    timeout_seconds: 300
+    
+  restart_service:
+    description: "Graceful restart of Muscle service"
+    steps:
+      - "drain_active_requests"
+      - "stop_service"
+      - "clear_gpu_memory"
+      - "restart_service"
+      - "wait_for_health_check"
+    timeout_seconds: 120
+    
+  flag_for_review:
+    description: "Alert operators without automatic rollback"
+    steps:
+      - "write_alert_log"
+      - "notify_vault"
+      - "escalate_to_user"
+    timeout_seconds: 10
+
+# Retrospective Writing (Watchdog Post-Mortem)
+retrospectives:
+  enabled: true
+  auto_write_on_rollback: true
+  include_metrics: true
+  include_error_traces: true
+  semantic_indexing: true
+  retention_days: 90
+  learning_feedback_loop: true  # Incorporate retrospectives into vector memory

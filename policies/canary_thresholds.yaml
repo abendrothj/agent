@@ -1,0 +1,125 @@
+# Canary & Shadow Promotion Thresholds
+# Controls when predictions can graduate from Shadow (baseline) to Canary (production-eligible)
+
+---
+# Global Canary Configuration
+global:
+  canary_enabled: true
+  shadow_burn_in_hours:
+    tier_2: 1
+    tier_3: 24
+    tier_4: 48
+  metrics_collector: "prometheus"
+  metrics_retention_days: 30
+
+# Tier 2 Canary Thresholds (Local Testing)
+tier_2_canary:
+  enabled: true
+  min_shadow_duration_hours: 1
+  success_rate_threshold: 0.90
+  error_rate_max: 0.10
+  sample_size_min: 5
+  semantic_similarity_min: 0.80
+  promotion_cooldown_seconds: 60
+
+# Tier 3 Canary Thresholds (Code Changes)
+tier_3_canary:
+  enabled: true
+  min_shadow_duration_hours: 24
+  success_rate_threshold: 0.95
+  error_rate_max: 0.05
+  sample_size_min: 20
+  semantic_similarity_min: 0.85
+  latency_p99_ms_target: 2000
+  latency_p99_max_increase_percent: 10
+  promotion_cooldown_seconds: 300
+  cpu_usage_max_percent: 80
+  memory_usage_max_percent: 85
+  metrics_window_size_min: 5
+  
+  # Canary traffic allocation (ramped)
+  canary_traffic_schedule:
+    - { minute: 0, percent: 0 }      # Start: 0% (Shadow only)
+    - { minute: 5, percent: 10 }     # Ramp: 10%
+    - { minute: 15, percent: 25 }    # Ramp: 25%
+    - { minute: 30, percent: 50 }    # Ramp: 50%
+    - { minute: 60, percent: 100 }   # Full: 100% (production)
+
+# Tier 4 Canary Thresholds (Critical Operations)
+tier_4_canary:
+  enabled: true
+  min_shadow_duration_hours: 48
+  success_rate_threshold: 0.99
+  error_rate_max: 0.01
+  sample_size_min: 50
+  semantic_similarity_min: 0.90
+  latency_p99_ms_target: 1500
+  latency_p99_max_increase_percent: 5
+  accuracy_degradation_max_percent: 1
+  promotion_cooldown_seconds: 600
+  cpu_usage_max_percent: 75
+  memory_usage_max_percent: 80
+  gpu_memory_usage_max_percent: 70
+  metrics_window_size_min: 10
+  
+  # Tier 4 requires Watchdog explicit approval before canary
+  watchdog_approval_required: true
+  watchdog_review_timeout_minutes: 30
+  
+  # Tier 4 canary traffic allocation (very conservative)
+  canary_traffic_schedule:
+    - { minute: 0, percent: 0 }       # Start: 0% (Shadow only)
+    - { minute: 10, percent: 1 }      # Canary: 1% (100 requests/day)
+    - { minute: 120, percent: 5 }     # Canary: 5% (500 requests/day)
+    - { minute: 360, percent: 10 }    # Canary: 10% (1000 requests/day)
+    - { minute: 1440, percent: 50 }   # Canary: 50% (after 24h)
+    - { minute: 2880, percent: 100 }  # Full: 100% (after 48h)
+
+# Shadow Baseline Quality Metrics
+shadow_quality:
+  enabled: true
+  min_responses_collected: 10
+  max_stale_baseline_hours: 168  # 7 days
+  baseline_freshness_check_interval_minutes: 60
+  
+  # Semantic consistency check (vector-based)
+  semantic_drift_detection:
+    enabled: true
+    max_drift_distance: 0.15  # euclidean distance from baseline centroid
+    check_interval_minutes: 30
+    alert_on_drift: true
+
+# Failure Recovery Rules
+failure_recovery:
+  enabled: true
+  max_consecutive_failures: 3
+  failure_window_minutes: 10
+  action_on_breach: "rollback"
+  
+  # Automatic rollback triggers
+  auto_rollback:
+    - metric: "error_rate"
+      threshold: "> 0.15"
+      action: "rollback"
+    - metric: "p99_latency_ms"
+      threshold: "> 10000"
+      action: "rollback"
+    - metric: "success_rate"
+      threshold: "< 0.80"
+      action: "rollback"
+
+# Shadow Baseline Refresh Policy
+baseline_refresh:
+  enabled: true
+  refresh_interval_hours: 24
+  min_requests_for_refresh: 100
+  max_requests_for_refresh: 10000
+  refresh_strategy: "weighted_recent"  # Favor recent samples in aggregation
+
+# Metrics Export (for dashboards)
+metrics_export:
+  enabled: true
+  export_interval_seconds: 60
+  format: "prometheus"
+  retention_days: 30
+  dashboard_refresh_seconds: 15

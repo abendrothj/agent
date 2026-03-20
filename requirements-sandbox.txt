@@ -1,0 +1,7 @@
+# Python dependencies for Sandbox service
+psycopg[binary]>=3.1.14
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+prometheus-client>=0.19.0

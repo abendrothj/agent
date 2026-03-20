@@ -1,0 +1,216 @@
+"""
+Vault Service - Main orchestrator and approval gating
+Runs on Pi as central decision maker.
+
+Control flow is implemented as a LangGraph StateGraph (see langgraph_vault.py)
+for explicit routing, human-in-the-loop MFA interrupts, and PostgreSQL checkpointing.
+Long-term memory uses GraphRAG (see internal/memory/graph/client.py) for
+relationship-aware retrieval over PR history and failure retrospectives.
+"""
+import logging
+import asyncio
+from typing import Optional, Tuple
+from datetime import datetime
+import os
+
+from internal.core.risk.classifier import RiskClassifier, Tier
+from internal.memory.ledger.store import LedgerStore
+from internal.memory.context.manager import ContextManager
+from internal.memory.graph.client import GraphRAGClient
+from cmd.vault.langgraph_vault import LangGraphVault
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class VaultService:
+    """
+    Vault orchestrator — delegates all approval logic to LangGraphVault.
+    Public API is unchanged so the gRPC server layer needs no modification.
+    """
+
+    # Configuration from environment
+    DB_HOST = os.getenv("VAULT_DB_HOST", "localhost")
+    DB_PORT = int(os.getenv("VAULT_DB_PORT", "5432"))
+    DB_NAME = os.getenv("VAULT_DB_NAME", "agent_memory")
+    DB_USER = os.getenv("VAULT_DB_USER", "vault")
+    DB_PASSWORD = os.getenv("VAULT_DB_PASSWORD", "vault_secure_pass")
+
+    REDIS_HOST = os.getenv("VAULT_REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("VAULT_REDIS_PORT", "6379"))
+
+    GRPC_PORT = int(os.getenv("VAULT_GRPC_PORT", "50051"))  # LAN port Win11 Muscle connects to
+    GRPC_HOST = os.getenv("VAULT_GRPC_HOST", "0.0.0.0")
+
+    MFA_TIMEOUT_SECONDS = int(os.getenv("VAULT_MFA_TIMEOUT", "600"))
+    TOKEN_TTL_HOURS = int(os.getenv("VAULT_TOKEN_TTL", "24"))
+
+    GRAPHRAG_INDEX_DIR = os.getenv("GRAPHRAG_INDEX_DIR", "./graphrag_index")
+
+    def __init__(self):
+        self.classifier = RiskClassifier()
+        self.ledger: Optional[LedgerStore] = None
+        self.context: Optional[ContextManager] = None
+        self.graph_client: Optional[GraphRAGClient] = None
+        self._lg_vault: Optional[LangGraphVault] = None
+
+    async def initialize(self):
+        """Initialize Vault services"""
+        logger.info("Initializing Vault Service (LangGraph mode)...")
+
+        self.ledger = LedgerStore(
+            db_host=self.DB_HOST,
+            db_port=self.DB_PORT,
+            db_name=self.DB_NAME,
+            db_user=self.DB_USER,
+            db_password=self.DB_PASSWORD,
+        )
+        await self.ledger.connect()
+
+        self.context = ContextManager(
+            redis_host=self.REDIS_HOST,
+            redis_port=self.REDIS_PORT,
+        )
+        await self.context.connect()
+
+        # GraphRAG long-term memory (gracefully degrades if index not built yet)
+        self.graph_client = GraphRAGClient(index_dir=self.GRAPHRAG_INDEX_DIR)
+        await self.graph_client.initialize()
+
+        # LangGraph vault — wires together all dependencies
+        self._lg_vault = LangGraphVault(
+            ledger=self.ledger,
+            context=self.context,
+            graph_client=self.graph_client,
+        )
+        await self._lg_vault.initialize()
+
+        logger.info("Vault Service initialized successfully")
+    
+    async def shutdown(self):
+        """Graceful shutdown"""
+        logger.info("Shutting down Vault Service...")
+        if self.ledger:
+            await self.ledger.disconnect()
+        if self.context:
+            await self.context.disconnect()
+        logger.info("Vault Service shut down")
+
+    async def process_request(
+        self,
+        request_id: str,
+        prompt: str,
+        system_context: str,
+        scope: str = "local",
+        approval_token: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Tuple[bool, str, Tier]:
+        """
+        Main approval gating — delegated to LangGraph state machine.
+
+        Returns: (approved, reason, tier)
+
+        If the graph pauses for human MFA approval, reason will be
+        "PENDING_MFA:<request_id>" and approved will be False.
+        The caller should invoke resume_after_mfa() once the human decides.
+        """
+        if self._lg_vault is None:
+            raise RuntimeError("VaultService not initialized")
+
+        approved, reason, tier_int = await self._lg_vault.process_request(
+            request_id=request_id,
+            prompt=prompt,
+            system_context=system_context,
+            scope=scope,
+            approval_token=approval_token,
+            session_id=session_id or request_id,
+        )
+        return approved, reason, Tier(tier_int)
+
+    async def resume_after_mfa(
+        self,
+        request_id: str,
+        human_approved: bool,
+    ) -> Tuple[bool, str, Tier]:
+        """
+        Resume a LangGraph run that paused for human MFA approval.
+        Call this after the human confirms/denies via the MFA channel.
+        """
+        if self._lg_vault is None:
+            raise RuntimeError("VaultService not initialized")
+
+        approved, reason, tier_int = await self._lg_vault.resume_after_mfa(
+            thread_id=request_id,
+            human_approved=human_approved,
+        )
+        return approved, reason, Tier(tier_int)
+
+    async def get_state(self) -> dict:
+        """Get Vault ledger state info"""
+        if not self.ledger:
+            raise RuntimeError("Ledger not initialized")
+
+        approvals_count = await self.ledger.get_approval_count()
+        rejections_24h = await self.ledger.get_rejection_count_24h()
+        ledger_size = await self.ledger.get_ledger_size()
+
+        return {
+            "approvals_total": approvals_count,
+            "rejections_24h": rejections_24h,
+            "ledger_entries": ledger_size,
+            "timestamp_ms": int(datetime.utcnow().timestamp() * 1000),
+        }
+
+    async def enforce_rate_limit(
+        self,
+        session_id: str,
+        tier: Tier,
+    ) -> Tuple[bool, str]:
+        """
+        Enforce per-tier rate limits (also handled inside LangGraph graph,
+        kept here for direct callers that need a pre-flight check).
+        """
+        if not self.context:
+            raise RuntimeError("Context manager not initialized")
+
+        session_exists = await self.context.exists_session(session_id)
+        if not session_exists:
+            await self.context.create_session(session_id)
+
+        tier_limits = {
+            Tier.TIER_1_SAFE: 1000,
+            Tier.TIER_2_MINOR: 100,
+            Tier.TIER_3_MAJOR: 10,
+            Tier.TIER_4_CRITICAL: 1,
+        }
+        limit_per_hour = tier_limits.get(tier, 10)
+        counter_key = f"requests_tier_{tier}_hour"
+        count = await self.context.increment_counter(session_id, counter_key)
+
+        if count > limit_per_hour:
+            return False, f"Rate limit exceeded: {count}/{limit_per_hour} per hour for Tier {tier}"
+        return True, f"Rate limit OK: {count}/{limit_per_hour}"
+
+
+async def main():
+    """Run Vault service"""
+    vault = VaultService()
+    
+    try:
+        await vault.initialize()
+        
+        # Run gRPC server (will be implemented in grpc_server.py)
+        logger.info(f"Vault listening on {vault.GRPC_HOST}:{vault.GRPC_PORT}")
+        
+        # Keep running
+        await asyncio.Event().wait()
+    
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+    
+    finally:
+        await vault.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

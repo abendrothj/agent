@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package memory.v1;
+
+option go_package = "github.com/ja/agent/internal/api/memory";
+option python_package = "memory.v1";
+
+// VectorEntry represents a semantic memory fact (PR, failure, etc.)
+message VectorEntry {
+  string id = 1;
+  string text = 2;
+  repeated float embedding = 3;  // pgvector as array
+  string source_type = 4;  // "pr_history", "failure_log", "success_baseline"
+  map<string, string> metadata = 5;
+  int64 created_at_ms = 6;
+}
+
+// LedgerEntry is immutable action log
+message LedgerEntry {
+  string id = 1;
+  int64 timestamp_ms = 2;
+  string action_type = 3;  // "approve", "reject", "execute", "rollback", "retrospective"
+  string actor_id = 4;
+  string request_id = 5;
+  string details = 6;
+  string signature = 7;  // cryptographic commitment
+}
+
+// ContextEntry is short-term working memory
+message ContextEntry {
+  string session_id = 1;
+  map<string, string> state = 2;
+  int64 created_at_ms = 3;
+  int64 expires_at_ms = 4;
+}
+
+// SemanticSearchRequest queries vector memory
+message SemanticSearchRequest {
+  repeated float query_embedding = 1;
+  int32 limit = 2;
+  float similarity_threshold = 3;
+  string source_type_filter = 4;  // optional
+}
+
+// SemanticSearchResponse returns similar entries
+message SemanticSearchResponse {
+  repeated VectorEntry results = 1;  // sorted by similarity desc
+}
+
+// LedgerQueryRequest searches action log
+message LedgerQueryRequest {
+  string action_type_filter = 1;
+  int64 start_time_ms = 2;
+  int64 end_time_ms = 3;
+  int32 limit = 4;
+}
+
+// LedgerQueryResponse returns ledger entries
+message LedgerQueryResponse {
+  repeated LedgerEntry entries = 1;
+}
+
+// WriteVectorRequest stores semantic memory
+message WriteVectorRequest {
+  string text = 1;
+  string source_type = 2;
+  map<string, string> metadata = 3;
+}
+
+// WriteVectorResponse confirms storage
+message WriteVectorResponse {
+  string vector_id = 1;
+  bool success = 2;
+}
+
+// WriteLedgerRequest commits action to log
+message WriteLedgerRequest {
+  string action_type = 1;
+  string actor_id = 2;
+  string request_id = 3;
+  string details = 4;
+}
+
+// WriteLedgerResponse confirms append
+message WriteLedgerResponse {
+  string ledger_id = 1;
+  bool success = 2;
+}
+
+// Memory service manages persistent vector + ledger + context storage
+service Memory {
+  // SemanticSearch finds similar vectors (e.g., PR history, failure patterns)
+  rpc SemanticSearch(SemanticSearchRequest) returns (SemanticSearchResponse);
+  
+  // QueryLedger searches immutable action log
+  rpc QueryLedger(LedgerQueryRequest) returns (LedgerQueryResponse);
+  
+  // WriteVector stores semantic fact
+  rpc WriteVector(WriteVectorRequest) returns (WriteVectorResponse);
+  
+  // WriteLedger commits action to log (Watchdog primary use)
+  rpc WriteLedger(WriteLedgerRequest) returns (WriteLedgerResponse);
+}

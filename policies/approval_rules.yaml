@@ -1,0 +1,175 @@
+# Staged Autonomy v9.3 - Approval Rules & Risk Tier Enforcement
+# This is the ground truth for request gating policies across all tiers
+
+---
+# Global Policy Defaults
+global:
+  enforcement_enabled: true
+  mfa_required_min_tier: 3  # Tier 3+ requires multi-factor approval
+  signature_algorithm: "sha256"
+  token_ttl_hours: 24
+  rejection_cache_hours: 24
+
+# Tier 1: Safe Operations (Read-Only, No Approval Needed)
+tier_1_safe:
+  name: "Safe"
+  description: "Read-only queries, no system modification"
+  approval_required: false
+  examples:
+    - "List files in /home/user/documents"
+    - "Query git log for recent commits"
+    - "Read temperature sensor data"
+  automatic_approval: true
+  rate_limit: 1000/hour  # Very permissive
+  timeout_seconds: 30
+
+# Tier 2: Minor Operations (Local Testing)
+tier_2_minor:
+  name: "Minor"
+  description: "Local testing, minimal scope, reversible"
+  approval_required: true
+  approval_types:
+    - type: "self_approval"
+      description: "User approves own request"
+      mfa: false
+      cooldown_seconds: 5
+    - type: "quick_review"
+      description: "Sync approval from Vault cache (if <1h old)"
+      mfa: false
+      cooldown_seconds: 0
+  examples:
+    - "Run unit tests in sandbox"
+    - "Create temp files in /tmp"
+    - "Local database schema migration (rollback-safe)"
+  rate_limit: 100/hour
+  timeout_seconds: 60
+  metadata_required:
+    - "description"
+    - "scope"
+
+# Tier 3: Major Operations (Code Changes, Approval Required)
+tier_3_major:
+  name: "Major"
+  description: "Code changes, system-affecting, requires full approval + 24h shadow baseline"
+  approval_required: true
+  approval_types:
+    - type: "human_approval"
+      description: "Single human approver (with MFA)"
+      mfa: true
+      cooldown_seconds: 300  # 5 min for MFA
+    - type: "shadow_eligible"
+      description: "Auto-promote if Shadow pass 24h baseline + semantic match"
+      mfa: false
+      cooldown_seconds: 0
+      preconditions:
+        - "baseline_age_hours >= 24"
+        - "semantic_similarity >= 0.85"
+  examples:
+    - "Modify production config"
+    - "Create GitHub PR with code changes"
+    - "Update agent reasoning weights"
+  rate_limit: 10/hour
+  timeout_seconds: 300
+  metadata_required:
+    - "description"
+    - "scope"
+    - "risk_score"
+    - "pr_link"
+  canary_phase: "shadow_24h"
+  canary_success_rate: 0.95
+  canary_sample_size: 5
+
+# Tier 4: Critical Operations (System-Level, Requires MFA + Watchdog Review + 48h Shadow)
+tier_4_critical:
+  name: "Critical"
+  description: "System-level changes, requires MFA + Watchdog review + 48h Shadow baseline before canary"
+  approval_required: true
+  approval_types:
+    - type: "mfa_dual_approval"
+      description: "Two human approvers, both with MFA + signature verification"
+      mfa: true
+      num_approvers: 2
+      cooldown_seconds: 600  # 10 min for MFA
+    - type: "shadow_eligible_extended"
+      description: "Auto-promote if Shadow pass 48h baseline + semantic match + Watchdog clearance"
+      mfa: false
+      cooldown_seconds: 0
+      preconditions:
+        - "baseline_age_hours >= 48"
+        - "semantic_similarity >= 0.90"
+        - "watchdog_approval = true"
+        - "no_rejections_in_24h"  # 24h cache hit = auto-block (Vault enforces)
+  examples:
+    - "Override rollback threshold"
+    - "Modify memory schema"
+    - "Update Vault approval rules"
+    - "Grant elevated cluster permissions"
+  rate_limit: 1/hour
+  timeout_seconds: 600
+  metadata_required:
+    - "description"
+    - "scope"
+    - "risk_score"
+    - "executive_summary"
+    - "rollback_plan"
+  canary_phase: "shadow_48h_watchdog"
+  canary_success_rate: 0.99
+  canary_sample_size: 10
+
+# Tier 4 Rejection Cache: Auto-Block Repeated Rejections
+tier_4_rejection_cache:
+  enabled: true
+  cache_duration_hours: 24
+  policy: "identical_request_rejects_trigger_auto_block"
+  action: "auto_reject"
+  action_message: "Request matches cached Tier 4 rejection within 24h window; auto-blocked by Vault"
+  bypass_allowed: false  # No manual override
+
+# Signature Verification (mTLS)
+signatures:
+  required_for_tiers: [3, 4]
+  cert_common_name_patterns:
+    - "vault.staged-autonomy.local"
+    - "watchdog.staged-autonomy.local"
+    - "user-*.staged-autonomy.local"
+  revocation_check: true
+  revocation_cache_hours: 1
+
+# Vault Enforcement Behavior
+vault_enforcement:
+  permissive_mode: false  # true = warn but allow; false = strict reject
+  log_all_decisions: true
+  alert_on_override_attempts: true
+  override_approval_required_tiers: [4]  # Manual Tier 4 override requires explicit signature
+
+# Canary Promotion Rules (Shadow + Watchdog)
+canary_promotion:
+  shadow_min_age_hours:
+    tier_3: 24
+    tier_4: 48
+  semantic_similarity_threshold:
+    tier_3: 0.85
+    tier_4: 0.90
+  success_rate_threshold:
+    tier_3: 0.95
+    tier_4: 0.99
+  failure_rollback_action: "auto_block_24h"  # Failed canary triggers Tier 4 auto-block
+
+# Rollback Triggers (Watchdog Monitors)
+rollback_triggers:
+  - name: "high_error_rate"
+    condition: "error_rate > 0.10"
+    action: "rollback"
+    severity: "critical"
+  - name: "latency_spike"
+    condition: "p99_latency_ms > 5000"
+    action: "rollback"
+    severity: "high"
+  - name: "gpu_memory_exhaustion"
+    condition: "gpu_memory_available_mb < 512"
+    action: "throttle"
+    severity: "medium"
+  - name: "semantic_drift"
+    condition: "baseline_similarity < 0.70"
+    action: "flag_for_review"
+    severity: "medium"

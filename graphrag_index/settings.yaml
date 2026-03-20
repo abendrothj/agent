@@ -1,0 +1,108 @@
+## GraphRAG Index Configuration
+## Run `graphrag index --root .` from within this directory to build the knowledge graph.
+## Run `graphrag index --root . --update` for incremental updates (new documents only).
+
+encoding_model: cl100k_base
+skip_workflows: []
+
+llm:
+  api_key: ${OPENAI_API_KEY}
+  type: openai_chat
+  model: gpt-4o-mini          # cost-effective for entity extraction
+  model_supports_json: true
+  max_tokens: 4096
+  temperature: 0.0
+
+parallelization:
+  stagger: 0.3
+  num_threads: 50
+
+async_mode: threaded
+
+embeddings:
+  async_mode: threaded
+  llm:
+    api_key: ${OPENAI_API_KEY}
+    type: openai_embedding
+    model: text-embedding-3-small
+
+chunks:
+  size: 1200
+  overlap: 100
+  group_by_columns: [id]
+
+input:
+  type: file
+  file_type: text
+  base_dir: "input"
+  file_encoding: utf-8
+  file_pattern: ".*\\.txt$"
+
+cache:
+  type: file
+  base_dir: "cache"
+
+storage:
+  type: file
+  base_dir: "output/${timestamp}/artifacts"
+
+reporting:
+  type: file
+  base_dir: "output/${timestamp}/reports"
+
+entity_extraction:
+  prompt: "prompts/entity_extraction.txt"
+  entity_types:
+    - file            # source file (auth.py, config.py, etc.)
+    - function        # function or method
+    - pull_request    # PR number
+    - failure         # specific failure event
+    - deployment      # deployment event
+    - developer       # team member (anonymised ok)
+  max_gleanings: 1
+
+summarize_descriptions:
+  prompt: "prompts/summarize_descriptions.txt"
+  max_length: 500
+
+claim_extraction:
+  enabled: true
+  prompt: "prompts/claim_extraction.txt"
+  description: >
+    Any claim or finding about the relationship between a code change and its outcome
+    (caused failure, fixed bug, introduced regression, improved reliability).
+  max_gleanings: 1
+
+community_reports:
+  prompt: "prompts/community_report.txt"
+  max_length: 2000
+  max_input_length: 8000
+
+cluster_graph:
+  max_cluster_size: 10
+
+embed_graph:
+  enabled: true
+
+umap:
+  enabled: false           # disable for Pi (compute-heavy)
+
+snapshots:
+  graphml: true
+  raw_entities: true
+  top_level_nodes: true
+
+local_search:
+  text_unit_prop: 0.5
+  community_prop: 0.1
+  conversation_history_max_turns: 5
+  top_k_matched_entities: 10
+  top_k_relationships: 10
+  max_tokens: 12000
+
+global_search:
+  max_tokens: 12000
+  data_max_tokens: 12000
+  map_max_tokens: 1000
+  reduce_max_tokens: 2000
+  concurrency: 32

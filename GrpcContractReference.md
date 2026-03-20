@@ -1,22 +1,28 @@
-# gRPC Contract Reference: Teammate v9.3
+# gRPC Contract Reference: Staged Autonomy v9.3
 
 ## Overview
 
-The system uses **three core gRPC services** that define the contract between components:
+The system uses **four core gRPC services** defining the contract between components.
+All services are implemented in **Python 3.11** with `grpcio`.
+Inference runs on **HuggingFace Transformers** (not Ollama).
+Vault control flow is implemented as a **LangGraph StateGraph** backed by an **AsyncPostgresSaver** checkpointer.
+Long-term memory uses **GraphRAG** (Microsoft) for relationship-aware retrieval over failure history.
 
-| Service | Hostname | Role | Threat Model |
-|---------|----------|------|--------------|
-| **Muscle** | Win11 (3060Ti) | Stateless inference | Untrusted compute |
-| **Vault** | Raspberry Pi | Orchestrator, gatekeeper, decisions | Trusted core |
-| **Shadow** | Raspberry Pi | Dry-run validator, learner | Trusted core |
+| Service | Host | Port | Role | Threat Model |
+|---------|------|------|------|--------------|
+| **Muscle** | Win11 (RTX 3060Ti) | 50051 | Stateless HF Transformers inference | Untrusted compute |
+| **Vault** | Raspberry Pi | 50052 | LangGraph orchestrator + approval gating | Trusted core |
+| **Shadow** | Raspberry Pi | 50053 | Baseline recorder + canary eligibility | Trusted core |
+| **Watchdog** | Raspberry Pi | 50054 | Health monitor + failure retrospectives | Trusted core |
 
 ---
 
 ## 1. Muscle Service (Win11 gRPC Endpoint)
 
-**File:** `internal/api/muscle.proto`
+**File:** `internal/api/muscle.proto`  
+**Implementation:** `cmd/muscle/grpc_server.py` + `cmd/muscle/hf_model.py`
 
-**Role:** Pure inference. Accepts prompts, returns tokens. Nothing else.
+**Role:** Pure inference via HuggingFace Transformers (OpenHermes 2.5 Mistral-7B on RTX 3060Ti). Accepts prompts, streams tokens. Holds no credentials or state.
 
 ### Main RPC: `GenerateResponse`
 
@@ -32,7 +38,7 @@ Pi Vault (client) → Win11 Muscle (server)
     constraints: { "max_self_mods": "5/day" }
   }
 
-  Muscle Streams back:
+  Muscle streams back:
   Response: TokenResponse {
     token: "def "
     token_index: 0
@@ -40,14 +46,6 @@ Pi Vault (client) → Win11 Muscle (server)
     metadata: { confidence: 0.95, ... }
     status: "ok"
   }
-  
-  Response: TokenResponse {
-    token: "calculate"
-    token_index: 1
-    is_complete: false
-    ...
-  }
-  
   ... (continues until is_complete: true)
 ```
 
@@ -60,15 +58,16 @@ Pi Vault (client) → Win11 Muscle (server)
 
 ### Health RPC: `Health`
 
-Watchdog periodically pings Win11 to confirm Ollama is running.
+Watchdog periodically pings Win11 to confirm the HF Transformers model server is running.
 
 ---
 
 ## 2. Vault Service (Pi gRPC Endpoint)
 
-**File:** `internal/api/vault.proto`
+**File:** `internal/api/vault.proto`  
+**Implementation:** `cmd/vault/main.py` (service bootstrap) + `cmd/vault/langgraph_vault.py` (LangGraph state machine)
 
-**Role:** Receives user requests, orchestrates reasoning, validates outputs, executes approved actions.
+**Role:** Receives requests and runs them through a typed **LangGraph StateGraph** for approval gating. Every decision is written to the immutable PostgreSQL ledger. Supports **human-in-the-loop MFA** via `interrupt()` — graph suspends at `request_human_approval` and resumes when the human responds. Checkpointer: `AsyncPostgresSaver` — full state persisted between nodes so a Pi reboot mid-approval resumes cleanly.
 
 ### Main RPC: `ProcessPrompt`
 
@@ -83,37 +82,35 @@ API Gateway (client) → Vault (server)
   }
 
   Vault Response: VaultResponse {
-    type: PR_PROPOSED  // or DIRECT, ACTION_PENDING, ERROR
+    type: PR_PROPOSED  // or DIRECT, ACTION_PENDING, PENDING_MFA, ERROR
     response_id: "resp_001"
     content: "I've created PR #42 to fix this..."
     tier_classified: TIER_2
-    approval: PENDING_SHADOW  // awaiting dry-run
-    action: {
-      action_type: "code_commit"
-      description: "Merge fix for bug X"
-      affected_files: ["src/fixes.py"]
-      shadow_pr_link: "https://github.com/agent/repo/pull/999"
-    }
+    approval: APPROVED  // or PENDING_MFA:<request_id>
   }
 ```
 
-**Decision Logic Inside Vault:**
-1. Classify risk tier (using `internal/core/risk` classifier)
-2. If Tier 1-2: Decide immediately (low risk)
-3. If Tier 3+: 
-   - Route to Muscle for reasoning (via gRPC tunnel)
-   - Validate response (check for injection, etc.)
-   - Route to Shadow for dry-run
-   - Wait for Shadow approval
-   - Sign and merge PR
-4. Execute approved actions (GitHub API, file writes, etc.)
-5. Log everything (audit trail)
+**LangGraph Decision Graph:**
+```
+classify → T1 ─────────────────────────────────────────── approve
+         ├ T4 ─ check_rejection_cache ─ hit ────────────── reject
+         │                              miss ─┐
+         └ T2/3 ────────────────────────────►check_rate_limit
+                                               ├ exceeded ── reject
+                                               └ ok ─── query_graph_memory (GraphRAG)
+                                                           validate_token
+                                               ├ invalid(T2) ── reject
+                                               ├ valid(T2) ──── approve
+                                               └ T3/4 ── check_shadow_baseline
+                                                          ├ eligible ──── approve
+                                                          └ ineligible ── request_human_mfa
+                                                                          ├ granted ── approve
+                                                                          └ denied ─── reject
+```
 
 ### Other RPCs:
-
-- `ApproveAction(ApprovalRequest)` — Manually trigger (rarely used in permissive mode)
-- `QueryPolicy(PolicyQueryRequest)` — Ask current rate limits, tier configs
-- `Health(HealthCheck)` — Watchdog pings
+- `GetState(GetStateRequest)` — Returns ledger totals (approvals, rejections, entries)
+- `Health(HealthCheck)` — Watchdog liveness probe
 
 ---
 
@@ -121,49 +118,31 @@ API Gateway (client) → Vault (server)
 
 **File:** `internal/api/shadow.proto`
 
-**Role:** Validate proposed code changes before merge (dry-run). Learn by comparing prediction vs. reality.
+**File:** `internal/api/shadow.proto`  
+**Implementation:** `cmd/shadow/main.py`
 
-### Main RPC: `ValidateProposal`
+**Role:** Records 24h prediction baselines; evaluates canary eligibility via cosine similarity against stored baselines. Also consulted by the Vault's `check_shadow_baseline` LangGraph node via `GraphRAGClient.check_baseline_eligibility()`.
 
-```
-Vault (client) → Shadow (server)
-  Request: ValidationRequest {
-    session_id: "xyz789"
-    muscle_version: "v2.1.0"
-    pr_title: "Add logging to generate_response()"
-    file_diffs: [
-      {
-        file_path: "src/agent.py"
-        operation: "modify"
-        before_content: "def generate_response(...):\n  ..."
-        after_content: "def generate_response(...):\n  log.info(...)\n  ..."
-        risky_patterns: []  // no infinite loops, etc.
-      }
-    ]
-    phase: PHASE_SANDBOX_TEST
-  }
+### Main RPCs:
 
-  Shadow Response: ValidationResponse {
-    validation_id: "val_001"
-    is_safe: true  // OK to merge
-    confidence: 0.99
-    validation_type: VALIDATION_PASSED
-    issues: []  // no problems found
-    test_results: ["✓ test_generate_response PASSED", ...]
-    prediction: {
-      will_agent_still_work: true
-      predicted_behavior: "Agent generates responses with debug logging"
-      predicted_correctness: 0.98
-      new_capabilities: ["Enhanced debugging"]
-    }
-    shadow_pr_url: "https://github.com/agent/agent-shadow/pull/42"
-  }
-```
+- `RecordBaseline(RecordBaselineRequest)` — Store a (prompt, response, embedding) triple as the baseline for this request type
+- `CheckCanaryEligibility(CheckCanaryEligibilityRequest)` — Is a similar request eligible for auto-promotion? (requires 24h baseline age + similarity ≥ threshold)
+- `VerifyBaselineAge(BaselineAgeRequest)` — How old is the oldest baseline matching this request type?
 
-### Other RPCs:
+---
 
-- `RecordOutcome(OutcomeReport)` — After 24h observation, report actual results vs. predictions
-- `QueryReadiness(ReadinessQuery)` — Is this Muscle version ready to go live?
+## 4. Watchdog Service (Pi gRPC Endpoint)
+
+**File:** `internal/api/sandbox.proto` (shared contract)  
+**Implementation:** `cmd/watchdog/main.py`
+
+**Role:** Monitors health metrics, triggers rollbacks, writes failure retrospectives to both pgvector (for Shadow semantic similarity) and GraphRAG input directory (so failures become traversable graph entities queryable by Vault before future T3/4 approvals).
+
+### Main RPCs:
+
+- `MonitorMetrics(MetricsRequest)` — Check error rate, latency P99, GPU temp/memory; triggers rollback if thresholds breached
+- `WriteRetrospective(RetrospectiveRequest)` — Post-failure analysis; indexes into pgvector and stages in GraphRAG input for next index rebuild
+- `GetSystemHealth(HealthRequest)` — Overall health aggregating all services
 
 ---
 
@@ -174,42 +153,58 @@ Vault (client) → Shadow (server)
    └─→ Prompts via REST API
 
 2. API Gateway (Pi)
-   └─→ Calls Vault.ProcessPrompt(VaultPromptRequest)
+   └─→ Calls Vault gRPC service
 
-3. Vault (Pi) receives request
-   ├─→ Classifies risk tier
-   ├─→ If Tier 1-2: Decide immediately
-   └─→ If Tier 3-4:
-       ├─→ Calls Muscle.GenerateResponse(PromptRequest)  [to Win11]
-       │   └─→ Win11 streams back tokens
-       ├─→ Validates Muscle response
-       ├─→ Calls Shadow.ValidateProposal(ValidationRequest)  [on Pi]
-       │   └─→ Shadow returns ValidationResponse
-       └─→ If Shadow says safe:
-           ├─→ Create PR
-           ├─→ Call Shadow.RecordOutcome() after 24h
-           └─→ Merge PR
+3. Vault (Pi) — LangGraph StateGraph runs:
+   ├ classify_tier
+   ├ [T4] check_rejection_cache
+   ├ check_rate_limit
+   ├ query_graph_memory → GraphRAG: "Any known failures for this change type?"
+   ├ validate_token
+   ├ [T3/4] check_shadow_baseline → Shadow: cosine similarity check
+   ├ [ineligible] request_human_approval → interrupt() + resume via MFA channel
+   └ approve / reject → writes to immutable ledger
 
-4. Watchdog (Pi) monitors
-   ├─→ Pings Vault.Health()
-   ├─→ Pings Muscle.Health()  [to Win11]
-   └─→ Auto-reverts if cavy metrics breach policies
+4. Vault (if approved, T3+):
+   ├ Calls Muscle.GenerateResponse() → Win11 streams HF Transformers tokens
+   ├ Calls GitHub API → creates PR
+   └ Logs to ledger
 
-5. User gets response via API
+5. Watchdog (Pi) monitors continuously:
+   ├ Health pings to Vault + Muscle
+   ├ Metric threshold checks
+   ├ On failure: write_retrospective() → pgvector + GraphRAG input
+   └ Trigger rollback if thresholds breached
+
+6. GraphRAG index rebuild (scheduled/manual):
+   graphrag index --root graphrag_index
+   └ Failure retrospectives become traversable graph entities
+      queried by Vault before future T3/4 approvals
 ```
 
 ---
 
-## Implementation Checklist
+## Implementation Status
 
-- [ ] Generate Go code from `.proto` files (`protoc --go_out=...`)
-- [ ] Implement Muscle service (Ollama wrapper on Win11)
-- [ ] Implement Vault service (orchestrator on Pi)
-- [ ] Implement Shadow service (validator on Pi)
-- [ ] Build API Gateway (REST → gRPC conversion on Pi)
-- [ ] Set up gRPC mutual TLS (Vault ↔ Muscle tunnel)
-- [ ] Implement Watchdog monitors
-- [ ] Create audit logging middleware
+| Component | Status | File |
+|-----------|--------|------|
+| Muscle gRPC server | ✅ | `cmd/muscle/grpc_server.py` |
+| HuggingFace model integration | ✅ | `cmd/muscle/hf_model.py` |
+| Vault LangGraph state machine | ✅ | `cmd/vault/langgraph_vault.py` |
+| Vault service bootstrap | ✅ | `cmd/vault/main.py` |
+| Shadow baseline recorder | ✅ | `cmd/shadow/main.py` |
+| Watchdog health monitor | ✅ | `cmd/watchdog/main.py` |
+| Sandbox dry-run executor | ✅ | `cmd/sandbox-agent/main.py` |
+| PostgreSQL + pgvector schema | ✅ | `internal/memory/db_schema.sql` |
+| Vector memory client | ✅ | `internal/memory/vector/client.py` |
+| Immutable ledger | ✅ | `internal/memory/ledger/store.py` |
+| Redis context manager | ✅ | `internal/memory/context/manager.py` |
+| GraphRAG long-term memory | ✅ | `internal/memory/graph/client.py` |
+| Risk tier classifier | ✅ | `internal/core/risk/classifier.py` |
+| GitHub provider | ✅ | `internal/providers/github.py` |
+| Safety validator | ✅ | `internal/safety/validator.py` |
+| Docker Compose deployment | ✅ | `deployments/docker-compose.yml` |
+| gRPC mTLS | ✅ | Enforced on all inter-service connections |
 
 ---
 
@@ -218,9 +213,10 @@ Vault (client) → Shadow (server)
 | Threat | Mitigated By |
 |--------|--------------|
 | Win11 compromise | Muscle is stateless; attacker gets inference tokens only |
-| Code injection in prompts | Vault validates all Muscle outputs before execution |
-| Infinite loops in generated code | Shadow dry-runs detect them before merge |
-| Runaway self-modification | Vault enforces rate limits (max_changes_per_day) |
+| Code injection in prompts | `internal/safety/validator.py` validates all inputs |
+| Runaway self-modification | LangGraph rate limit node; per-tier counters in Redis |
 | Failed code in production | Watchdog auto-reverts if metrics breach thresholds |
+| Replay of rejected T4 requests | 24h rejection cache in immutable ledger |
+| Mid-approval Pi reboot | LangGraph `AsyncPostgresSaver` checkpoints every node |
 | Pi compromise | Beyond scope; assume hardware security |
 

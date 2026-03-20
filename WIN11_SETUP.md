@@ -250,6 +250,7 @@ Create `C:\teammate-muscle\.env`:
 
 ```env
 # Hugging Face Model Configuration
+# Hugging Face Model Configuration
 HF_MODEL_ID=NousResearch/Hermes-2.5-Mistral-7B
 HF_DEVICE=cuda
 HF_DTYPE=float16              # Options: float16, float32
@@ -258,9 +259,17 @@ HF_TEMPERATURE=0.7            # Creativity (0.1=deterministic, 1.0=creative)
 HF_TOP_K=50                   # Diversity in sampling
 HF_TOP_P=0.9                  # Nucleus sampling
 
-# gRPC Server
+# gRPC Server (Win11 Muscle listens here)
 GRPC_PORT=50051
 GRPC_HOST=0.0.0.0
+
+# Pi Connection — update <pi_ip_address> to match your Pi's LAN IP
+# Vault: where the Win11 Muscle sends approval requests
+VAULT_API_URL=http://<pi_ip_address>:50051
+# Neo4j: where the Win11 Muscle queries the GraphRAG knowledge graph
+NEO4J_URI=bolt://<pi_ip_address>:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=super_secure_password
 
 # mTLS Certificates (paths)
 CERT_FILE=./certs/muscle.crt
@@ -282,6 +291,7 @@ ACTIVITY_CHECK_INTERVAL_SEC=5     # Monitor every 5 seconds
 - `HF_MODEL_ID`: Options: `NousResearch/Hermes-2.5-Mistral-7B` (7B, recommended), `meta-llama/Llama-2-7b-hf`, etc.
 - `HF_DTYPE`: `float16` recommended for 3060Ti (8GB VRAM). Use `float32` for more accuracy but needs 16GB+
 - `HF_TEMPERATURE`: Lower = more focused (0.3-0.5 for coding), Higher = more creative (0.7-1.0 for brainstorming)
+- `VAULT_API_URL` / `NEO4J_URI`: Replace `<pi_ip_address>` with your Pi's LAN IP (run `hostname -I` on the Pi to find it)
 
 ---
 

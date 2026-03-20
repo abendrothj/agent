@@ -1,0 +1,14 @@
+# Python dependencies for Watchdog service
+psycopg[binary]>=3.1.14
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+prometheus-client>=0.19.0
+
+# GraphRAG — index failure retrospectives as graph entities
+graphrag>=0.3.0
+networkx>=3.0
+
+# Neo4j — real-time writes to memory_store container
+neo4j>=5.0.0

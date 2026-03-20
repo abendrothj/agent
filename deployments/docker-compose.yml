@@ -1,0 +1,200 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector for vector memory, ledger, and LangGraph checkpoints
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: agent_postgres
+    environment:
+      POSTGRES_DB: agent_memory
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: vault_secure_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./internal/memory/db_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./scripts/init_db_users.sql:/docker-entrypoint-initdb.d/02-users.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - vault_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis for session context and rate-limit counters
+  redis:
+    image: redis:7-alpine
+    container_name: agent_redis
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - vault_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Neo4j graph database — backing store for GraphRAG knowledge graph
+  # Carries failure retrospectives, PR history, and code entity relationships.
+  # Exposed to the LAN so the Win11 Muscle can query it directly.
+  memory_store:
+    image: neo4j:5
+    container_name: memory_store
+    environment:
+      NEO4J_AUTH: neo4j/super_secure_password
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+    volumes:
+      - teammate_memory:/data
+    ports:
+      - "7474:7474"   # Neo4j Browser UI
+      - "7687:7687"   # Bolt protocol (used by GraphRAGClient and Win11 Muscle)
+    networks:
+      - vault_net
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Vault Service — LangGraph orchestrator & approval gating
+  # Exposes port 50051 to the LAN so the Win11 Muscle can submit requests.
+  # Mounts the Docker socket so it can spin up ephemeral Sandbox containers.
+  vault:
+    build:
+      context: .
+      dockerfile: cmd/vault/Dockerfile
+    container_name: agent_vault
+    environment:
+      VAULT_DB_HOST: postgres
+      VAULT_DB_PORT: 5432
+      VAULT_DB_NAME: agent_memory
+      VAULT_DB_USER: vault
+      VAULT_DB_PASSWORD: vault_secure_pass
+      VAULT_REDIS_HOST: redis
+      VAULT_REDIS_PORT: 6379
+      VAULT_GRPC_PORT: 50051
+      VAULT_GRPC_HOST: 0.0.0.0
+      NEO4J_URI: bolt://memory_store:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: super_secure_password
+      GRAPHRAG_INDEX_DIR: /app/graphrag_index
+      LOG_LEVEL: INFO
+    ports:
+      - "50051:50051"   # LAN-accessible — Win11 Muscle connects here
+    volumes:
+      - ./graphrag_index:/app/graphrag_index
+      - /var/run/docker.sock:/var/run/docker.sock  # For spawning ephemeral Sandboxes
+    networks:
+      - vault_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      memory_store:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Shadow Service — baseline recorder & canary eligibility
+  shadow:
+    build:
+      context: .
+      dockerfile: cmd/shadow/Dockerfile
+    container_name: agent_shadow
+    environment:
+      SHADOW_DB_HOST: postgres
+      SHADOW_DB_PORT: 5432
+      SHADOW_DB_NAME: agent_memory
+      SHADOW_DB_USER: shadow
+      SHADOW_DB_PASSWORD: shadow_secure_pass
+      SHADOW_GRPC_PORT: 50053
+      SHADOW_GRPC_HOST: 0.0.0.0
+      LOG_LEVEL: INFO
+    ports:
+      - "50053:50053"
+    networks:
+      - vault_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Watchdog Service — health monitor + retrospective indexer
+  watchdog:
+    build:
+      context: .
+      dockerfile: cmd/watchdog/Dockerfile
+    container_name: agent_watchdog
+    environment:
+      WATCHDOG_DB_HOST: postgres
+      WATCHDOG_DB_PORT: 5432
+      WATCHDOG_DB_NAME: agent_memory
+      WATCHDOG_DB_USER: watchdog
+      WATCHDOG_DB_PASSWORD: watchdog_secure_pass
+      WATCHDOG_GRPC_PORT: 50054
+      WATCHDOG_GRPC_HOST: 0.0.0.0
+      NEO4J_URI: bolt://memory_store:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: super_secure_password
+      GRAPHRAG_INDEX_DIR: /app/graphrag_index
+      LOG_LEVEL: INFO
+    ports:
+      - "50054:50054"
+    volumes:
+      - ./graphrag_index:/app/graphrag_index
+    networks:
+      - vault_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      memory_store:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Sandbox Service — ephemeral dry-run executor
+  # Attached to sandbox_net only: can reach Muscle but has no access to vault_net secrets.
+  sandbox-agent:
+    build:
+      context: .
+      dockerfile: cmd/sandbox-agent/Dockerfile
+    container_name: agent_sandbox
+    environment:
+      SANDBOX_DB_HOST: postgres
+      SANDBOX_DB_PORT: 5432
+      SANDBOX_DB_NAME: agent_memory
+      SANDBOX_DB_USER: sandbox
+      SANDBOX_DB_PASSWORD: sandbox_secure_pass
+      MUSCLE_HOST: 192.168.1.100  # Win11 GPU machine — update to your actual IP
+      MUSCLE_PORT: 50051
+      SANDBOX_GRPC_PORT: 50055
+      SANDBOX_GRPC_HOST: 0.0.0.0
+      LOG_LEVEL: INFO
+    ports:
+      - "50055:50055"
+    networks:
+      - sandbox_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  teammate_memory:          # Neo4j graph data — persists relationships between restarts
+    driver: local
+
+networks:
+  vault_net:
+    external: true          # Created by: docker network create vault_net
+  sandbox_net:
+    external: true          # Created by: docker network create sandbox_net

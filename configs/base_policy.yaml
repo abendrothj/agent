@@ -1,0 +1,186 @@
+# Base Policy Configuration - Global Immutable Policy for Staged Autonomy v9.3
+# This file defines core system constraints and should be mounted as read-only in all services
+# Last Updated: 2025-01-01
+
+spec_version: "9.3"
+namespace: "staged-autonomy"
+enforcement: "strict"
+
+# Service Architecture
+services:
+  muscle:
+    description: "Reasoning engine (Win11 GPU)"
+    duties:
+      - "generate responses"
+      - "stream tokens"
+      - "report GPU metrics"
+    cannot_do:
+      - "approve requests"
+      - "modify state"
+      - "access filesystem (except inference cache)"
+    network_isolation: "gated through Vault"
+    
+  vault:
+    description: "Orchestrator & approval gating (Pi)"
+    duties:
+      - "gate requests by tier"
+      - "maintain approval ledger"
+      - "enforce rejection cache"
+      - "validate mTLS signatures"
+    cannot_do:
+      - "execute actions directly"
+      - "override own policies"
+    network_isolation: "gated mTLS only"
+    
+  shadow:
+    description: "Prediction validator (Pi)"
+    duties:
+      - "record 24h baselines"
+      - "track semantic similarity"
+      - "evaluate canary eligibility"
+    cannot_do:
+      - "grant approvals"
+      - "execute canary promotion"
+    network_isolation: "read-only from Muscle/Vault"
+    
+  watchdog:
+    description: "Health monitor & retrospective writer (Pi)"
+    duties:
+      - "monitor error rates"
+      - "write failure retrospectives"
+      - "trigger rollbacks"
+      - "update memory with learnings"
+    cannot_do:
+      - "override Vault decisions"
+      - "modify approval rules at runtime"
+    network_isolation: "alert-only to Vault (no commands)"
+
+# Memory System
+memory:
+  backend: "PostgreSQL + pgvector"
+  persistence: "non-volatile (persistent volumes)"
+  replication: "off-chain backup weekly"
+  access_control:
+    - service: "muscle"
+      permissions: ["query_vector_memory"]
+      restrictions: ["no_write", "no_ledger_access"]
+    - service: "vault"
+      permissions: ["full"]
+    - service: "shadow"
+      permissions: ["read_vector", "write_baseline"]
+      restrictions: ["no_ledger_write"]
+    - service: "watchdog"
+      permissions: ["read_all", "write_retrospectives", "write_ledger"]
+      restrictions: ["write_approval_tokens"]
+
+# Approval Tier System (Immutable)
+tiers:
+  tier_1_safe:
+    approval_required: false
+    mfa: false
+    examples: ["read-only queries"]
+    
+  tier_2_minor:
+    approval_required: true
+    mfa: false
+    baseline_required: false
+    examples: ["local testing", "temp files"]
+    
+  tier_3_major:
+    approval_required: true
+    mfa: true
+    baseline_required: true  # 24h Shadow baseline
+    shadow_min_hours: 24
+    semantic_similarity_min: 0.85
+    one_hit_to_canary: true
+    examples: ["code changes", "config updates"]
+    
+  tier_4_critical:
+    approval_required: true
+    mfa: true
+    baseline_required: true  # 48h Shadow baseline
+    shadow_min_hours: 48
+    semantic_similarity_min: 0.90
+    watchdog_approval_required: true
+    rejection_cache_24h_auto_block: true  # Immutable: identical Tier 4 rejects = auto-block 24h
+    examples: ["system config", "memory schema changes", "policy overrides"]
+
+# Rejection Cache (Immutable - Tier 4 Safety Feature)
+rejection_cache:
+  enabled: true
+  tier_4_cache_hours: 24
+  cache_key: "request_id + tier + date_bucket"
+  behavior: "auto_reject identical within window"
+  no_bypass: true  # Cannot be disabled or overridden
+  logging: "all_cache_hits_to_ledger"
+
+# Communication & Isolation
+network:
+  protocol: "gRPC + mTLS"
+  cert_rotation_days: 30
+  mfa_timeout_seconds: 600
+  inter_service_only: true  # No external network access
+  
+  firewall:
+    muscle: "LAN 50051 (gRPC from Vault only)"
+    vault: "LAN 50052 (gRPC from all services)"
+    shadow: "LAN 50053 (gRPC from Vault/Watchdog)"
+    watchdog: "LAN 50054 (alert-only to Vault)"
+
+# Audit & Logging
+audit:
+  ledger_storage: "immutable PostgreSQL ledger_entries table"
+  all_decisions_logged: true
+  ledger_retention_forever: true
+  signatures_required_tiers: [3, 4]
+  alert_on_policy_violations: true
+  alert_recipients: ["vault", "watchdog", "user:admin"]
+
+# Rollback & Safety
+safety:
+  canary_failure_auto_rollback: true
+  error_rate_threshold_rollback: 0.10
+  latency_spike_threshold_rollback: 5000  # ms
+  gpu_thermal_critical_rollback: 85  # celsius
+  manual_emergency_rollback: true  # User can trigger panic button
+  retrospective_on_every_rollback: true
+
+# Rate Limiting (Per Tier)
+rate_limits:
+  tier_1: "1000 req/hour"
+  tier_2: "100 req/hour"
+  tier_3: "10 req/hour"
+  tier_4: "1 req/hour"
+
+# TTL & Expiry
+ttl:
+  approval_tokens: "24 hours"
+  rejection_cache: "24 hours (Tier 4 only)"
+  context_entries: "1 hour"
+  baseline_predictions: "7 days"
+  retrospectives: "90 days"
+  ledger_entries: "forever"
+
+# Immutability Guarantees
+immutable_features:
+  - "ledger_entries (append-only)"
+  - "approved_requests (cannot be deleted)"
+  - "rejection_cache_tier4 (cannot be disabled)"
+  - "tier_system_definitions (cannot be changed at runtime)"
+  - "service_isolation (cannot be relaxed)"
+
+# Compliance & Monitoring
+compliance:
+  audit_trail: "complete"
+  decision_transparency: "all approvals/rejections recorded"
+  policy_version_tracked: "yes"
+  emergency_access_logged: "yes"
+  no_hidden_paths: true
+
+# Version Control
+version: "9.3.0"
+release_date: "2025-01-01"
+min_vault_version: "9.3.0"
+compatible_muscle_versions: ["9.3.0", "9.3.1"]
+compatible_shadow_versions: ["9.3.0", "9.3.1"]
+compatible_watchdog_versions: ["9.3.0", "9.3.1"]
