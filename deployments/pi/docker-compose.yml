@@ -315,7 +315,6 @@ volumes:
   prometheus_data:
   grafana_data:
   git_identity:      # persists the agent's SSH keypair across container restarts
-  git_identity:      # persists the agent's SSH keypair across container restarts
 
 networks:
   vault_net:
