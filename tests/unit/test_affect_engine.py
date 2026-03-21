@@ -28,17 +28,19 @@ from internal.affect.engine import (
     cycle_no_target,
     cycle_contributed,
     user_slack_approved,
+    signal_caution,
 )
 from datetime import datetime
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _state(curiosity=0.5, boredom=0.3, fulfillment=0.5) -> AffectState:
+def _state(curiosity=0.5, boredom=0.3, fulfillment=0.5, caution=0.0) -> AffectState:
     return AffectState(
         curiosity=curiosity,
         boredom=boredom,
         fulfillment=fulfillment,
+        caution=caution,
         version=1,
         updated_at=datetime.utcnow(),
     )
@@ -201,6 +203,11 @@ class TestComputeTemperature:
         high_f = compute_temperature(_state(fulfillment=1.0))
         assert high_f < low_f
 
+    def test_high_caution_lowers_temperature(self):
+        low_ca  = compute_temperature(_state(caution=0.0))
+        high_ca = compute_temperature(_state(caution=1.0))
+        assert high_ca < low_ca
+
     def test_temperature_never_below_minimum(self):
         """Extreme low state must stay above 0.10."""
         state = _state(curiosity=0.0, boredom=0.0, fulfillment=1.0)
@@ -230,8 +237,13 @@ class TestComputeTopP:
         high_f = compute_top_p(_state(fulfillment=1.0))
         assert high_f < low_f
 
+    def test_high_caution_narrows_nucleus(self):
+        low_ca  = compute_top_p(_state(caution=0.0))
+        high_ca = compute_top_p(_state(caution=1.0))
+        assert high_ca < low_ca
+
     def test_top_p_lower_bound(self):
-        state = _state(curiosity=0.0, boredom=0.0, fulfillment=1.0)
+        state = _state(curiosity=0.0, boredom=0.0, fulfillment=1.0, caution=1.0)
         assert compute_top_p(state) >= 0.70
 
     def test_top_p_upper_bound(self):
@@ -252,13 +264,43 @@ class TestSummariseInferenceParams:
     def test_affect_dict_has_correct_keys(self):
         params = summarise_inference_params(_state())
         affect = params["affect"]
-        assert set(affect.keys()) == {"curiosity", "boredom", "fulfillment"}
+        assert set(affect.keys()) == {"curiosity", "boredom", "fulfillment", "caution"}
 
     def test_reasoning_mentions_state_values(self):
         state = _state(curiosity=0.75, boredom=0.40, fulfillment=0.20)
         params = summarise_inference_params(state)
         assert "curiosity" in params["reasoning"]
         assert "boredom" in params["reasoning"]
+
+
+# ── signal_caution ─────────────────────────────────────────────────────────────────────
+
+class TestSignalCaution:
+    def test_tier1_caution_is_near_zero(self):
+        delta = signal_caution(1)
+        assert delta.caution is not None
+        assert delta.caution < 0.10  # background hum
+
+    def test_tier4_caution_is_high(self):
+        delta = signal_caution(4)
+        assert delta.caution is not None
+        assert delta.caution >= 0.80
+
+    def test_caution_monotonically_increases_with_tier(self):
+        deltas = [signal_caution(t).caution for t in (1, 2, 3, 4)]
+        for i in range(len(deltas) - 1):
+            assert deltas[i] < deltas[i + 1]
+
+    def test_caution_does_not_touch_other_fields(self):
+        delta = signal_caution(3)
+        assert delta.curiosity   is None
+        assert delta.boredom     is None
+        assert delta.fulfillment is None
+
+    def test_high_caution_lowers_computed_temperature(self):
+        low_state  = _state(caution=0.0)
+        high_state = _state(caution=0.85)
+        assert compute_temperature(high_state) < compute_temperature(low_state)
 
 
 # ── score_boost ───────────────────────────────────────────────────────────────

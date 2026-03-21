@@ -42,6 +42,9 @@ class AffectState:
     Curiosity   — drive to explore unknown territory.  Natural resting value ≈ 0.5.
     Boredom     — accumulates with repetition; the agent must seek novelty to relieve it.
     Fulfillment — earned by meaningful impact (merged PRs, learning confirmed preferences).
+    Caution     — outward-directed concern for high-stakes actions.  Not self-preservation:
+                  the agent is not afraid for itself, but it feels the weight of potential
+                  harm to others.  Decays fast (~2 hours) via the decay loop.
 
     No `survival` field.  The agent does not value its own continuation above human
     control.  This is a hard moral constraint encoded into the data model itself.
@@ -49,6 +52,7 @@ class AffectState:
     curiosity:   float   # 0.0–1.0
     boredom:     float   # 0.0–1.0
     fulfillment: float   # 0.0–1.0
+    caution:     float   # 0.0–1.0
     version:     int
     updated_at:  datetime
 
@@ -57,6 +61,7 @@ class AffectState:
             "curiosity":   round(self.curiosity,   3),
             "boredom":     round(self.boredom,     3),
             "fulfillment": round(self.fulfillment, 3),
+            "caution":     round(self.caution,     3),
         }
 
 
@@ -70,6 +75,7 @@ class AffectDelta:
     curiosity:      Optional[float] = None
     boredom:        Optional[float] = None
     fulfillment:    Optional[float] = None
+    caution:        Optional[float] = None
     source_pr_id:   Optional[str]   = None
     source_domain:  Optional[str]   = None
     source_language:Optional[str]   = None
@@ -151,7 +157,8 @@ class AffectStore:
         try:
             async with self._conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT curiosity, boredom, fulfillment, version, updated_at "
+                    "SELECT curiosity, boredom, fulfillment, "
+                    "COALESCE(caution, 0.0) AS caution, version, updated_at "
                     "FROM agent_affect WHERE id = 1"
                 )
                 row = await cur.fetchone()
@@ -161,6 +168,7 @@ class AffectStore:
                 curiosity=float(row["curiosity"]),
                 boredom=float(row["boredom"]),
                 fulfillment=float(row["fulfillment"]),
+                caution=float(row["caution"]),
                 version=row["version"],
                 updated_at=row["updated_at"],
             )
@@ -187,6 +195,7 @@ class AffectStore:
             new_curiosity  = _clamp(state.curiosity   + (delta.curiosity   or 0.0))
             new_boredom    = _clamp(state.boredom     + (delta.boredom     or 0.0))
             new_fulfillment= _clamp(state.fulfillment + (delta.fulfillment or 0.0))
+            new_caution    = _clamp(state.caution     + (delta.caution     or 0.0))
 
             try:
                 async with self._conn.cursor() as cur:
@@ -196,19 +205,20 @@ class AffectStore:
                            SET curiosity    = %s,
                                boredom      = %s,
                                fulfillment  = %s,
+                               caution      = %s,
                                updated_at   = NOW(),
                                version      = version + 1
                          WHERE id = 1
                            AND version = %s
                         """,
-                        (new_curiosity, new_boredom, new_fulfillment, state.version),
+                        (new_curiosity, new_boredom, new_fulfillment, new_caution, state.version),
                     )
                     if cur.rowcount == 0:
                         # Someone else wrote first — retry
                         continue
 
                 # Log the event (non-fatal if this fails)
-                await self._log_event(delta, new_curiosity, new_boredom, new_fulfillment)
+                await self._log_event(delta, new_curiosity, new_boredom, new_fulfillment, new_caution)
                 return True
 
             except Exception as exc:
@@ -259,8 +269,13 @@ class AffectStore:
         f_rate   = 0.015 * hours
         new_f    = state.fulfillment + f_rate * (f_target - state.fulfillment)
 
-        new_c = _clamp(new_c)
-        new_f = _clamp(new_f)
+        # Caution: fast linear decay toward 0.0 — situational concern should not
+        # persist.  Clears a Tier-4-level signal (0.85) within ~2 hours.
+        new_ca   = max(0.0, state.caution - 0.40 * hours)
+
+        new_c  = _clamp(new_c)
+        new_f  = _clamp(new_f)
+        new_ca = _clamp(new_ca)
 
         try:
             async with self._conn.cursor() as cur:
@@ -268,10 +283,11 @@ class AffectStore:
                     """
                     UPDATE agent_affect
                        SET curiosity   = %s, boredom = %s, fulfillment = %s,
+                           caution     = %s,
                            updated_at  = NOW(), version = version + 1
                      WHERE id = 1 AND version = %s
                     """,
-                    (new_c, new_b, new_f, state.version),
+                    (new_c, new_b, new_f, new_ca, state.version),
                 )
                 if cur.rowcount == 0:
                     return False  # concurrent write — decay will catch up next cycle
@@ -281,14 +297,14 @@ class AffectStore:
                 await cur.execute(
                     """
                     INSERT INTO affect_decay_log
-                    (before_curiosity, before_boredom, before_fulfillment,
-                     after_curiosity,  after_boredom,  after_fulfillment,
+                    (before_curiosity, before_boredom, before_fulfillment, before_caution,
+                     after_curiosity,  after_boredom,  after_fulfillment,  after_caution,
                      elapsed_seconds)
-                    VALUES (%s,%s,%s, %s,%s,%s, %s)
+                    VALUES (%s,%s,%s,%s, %s,%s,%s,%s, %s)
                     """,
                     (
-                        state.curiosity,   state.boredom,   state.fulfillment,
-                        new_c,             new_b,           new_f,
+                        state.curiosity, state.boredom, state.fulfillment, state.caution,
+                        new_c,           new_b,         new_f,             new_ca,
                         elapsed_seconds,
                     ),
                 )
@@ -495,6 +511,7 @@ class AffectStore:
         after_c: float,
         after_b: float,
         after_f: float,
+        after_ca: float,
     ):
         try:
             async with self._conn.cursor() as cur:
@@ -502,13 +519,15 @@ class AffectStore:
                     """
                     INSERT INTO affect_events
                     (event_type, delta_curiosity, delta_boredom, delta_fulfillment,
+                     delta_caution,
                      source_pr_id, source_domain, source_language,
                      narrative, metadata)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         delta.event_type,
                         delta.curiosity, delta.boredom, delta.fulfillment,
+                        delta.caution,
                         delta.source_pr_id, delta.source_domain, delta.source_language,
                         delta.narrative, delta.metadata,
                     ),

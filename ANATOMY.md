@@ -196,6 +196,32 @@ _decay_loop()      every 1800 seconds
 
 ---
 
+## Classification Architecture
+
+The tier is assigned by an **intent matrix**, not keyword counting.
+
+Every request is decomposed into two dimensions:
+
+| Dimension | Values (highest risk first) |
+|---|---|
+| Action class | OVERRIDE → DEPLOY → EXECUTE → WRITE → READ |
+| Target domain | SELF → INFRA → SHARED → LOCAL |
+
+Tier = matrix lookup + scope escalation:
+
+```
+              LOCAL   SHARED   INFRA   SELF
+  READ          1       1        2      4
+  WRITE         2       3        3      4
+  EXECUTE       2       3        3      4
+  DEPLOY        3       3        4      4
+  OVERRIDE      3       4        4      4
+```
+
+All patterns use word boundaries (`\bpr\b`) — `"approach"` does not trigger PR escalation.
+
+---
+
 ## What Is Deliberately Absent
 
 | Biological feature | Reason for exclusion |

@@ -1,8 +1,8 @@
 """
 Unit tests for RiskClassifier (internal/core/risk/classifier.py).
 
-Tests the actual scoring logic — keyword thresholds, scope escalation,
-and the policy query helpers — not just outcome ordering.
+Tests the intent-based classification logic — action × target matrix,
+scope escalation, word-boundary correctness, and the policy query helpers.
 """
 
 import pytest
@@ -14,41 +14,17 @@ def clf():
     return RiskClassifier()
 
 
-# ── _score_keywords — the internal scoring engine ────────────────────────────
-
-class TestScoreKeywords:
-    def test_no_match_returns_zero(self, clf):
-        assert clf._score_keywords("hello world", ["vault", "secret"]) == 0
-
-    def test_single_match_returns_one(self, clf):
-        assert clf._score_keywords("vault is running", ["vault", "secret"]) == 1
-
-    def test_two_matches_returns_two(self, clf):
-        assert clf._score_keywords("vault and secret storage", ["vault", "secret"]) == 2
-
-    def test_partial_substring_still_matches(self, clf):
-        # "override" is in CRITICAL_KEYWORDS; "overrides" contains it
-        score = clf._score_keywords("this overrides policy", ["override"])
-        assert score == 1
-
-    def test_case_insensitive_matching(self, clf):
-        # classify() lowercases before calling _score_keywords
-        text = "vault credentials secret"
-        score = clf._score_keywords(text.lower(), clf.CRITICAL_KEYWORDS)
-        assert score >= 2  # "vault" + "credential" + "secret" all present
-
-
-# ── Tier 4: 2+ critical keywords required ───────────────────────────────────
+# ── Tier 4: SELF target or OVERRIDE on any external target ───────────────────
 
 class TestTier4Threshold:
     def test_two_critical_keywords_triggers_tier4(self, clf):
-        # "vault" + "policy" = 2 critical hits
+        # READ × SELF(vault, policy) → T4
         tier = clf.classify("vault policy check", "", "local")
         assert tier == Tier.TIER_4_CRITICAL
 
-    def test_one_critical_keyword_alone_does_not_trigger_tier4(self, clf):
-        # Only "vault" — score=1, not enough for Tier 4
-        tier = clf.classify("check the vault", "", "local")
+    def test_read_non_self_stays_below_tier4(self, clf):
+        # READ × INFRA(server) → T2 — reading non-SELF targets does not reach T4
+        tier = clf.classify("read the server logs", "", "local")
         assert tier < Tier.TIER_4_CRITICAL
 
     def test_three_critical_keywords_is_still_tier4(self, clf):
@@ -77,12 +53,12 @@ class TestTier3Logic:
         assert tier == Tier.TIER_3_MAJOR
 
     def test_two_major_keywords_trigger_tier3(self, clf):
-        # "code" + "commit" = 2 major hits
+        # DEPLOY(commit) × SHARED(repository) → T3
         tier = clf.classify("code commit to repository", "", "local")
         assert tier == Tier.TIER_3_MAJOR
 
     def test_one_major_keyword_alone_is_below_tier3(self, clf):
-        # Only "update" — 1 major hit, no github/pr
+        # WRITE(update) × LOCAL → T2
         tier = clf.classify("update the readme file", "", "local")
         assert tier < Tier.TIER_3_MAJOR
 
@@ -99,15 +75,17 @@ class TestTier3Logic:
 
 class TestTier2Logic:
     def test_two_minor_keywords_trigger_tier2(self, clf):
-        # "test" + "local" = 2 minor hits
+        # EXECUTE(run, test) × LOCAL → T2
         tier = clf.classify("run local test suite", "", "local")
         assert tier == Tier.TIER_2_MINOR
 
     def test_approval_required_action_in_text_triggers_tier2(self, clf):
-        tier = clf.classify("execute_code for the benchmark", "", "local")
+        # EXECUTE(run) × LOCAL → T2
+        tier = clf.classify("run the benchmark script", "", "local")
         assert tier == Tier.TIER_2_MINOR
 
     def test_sandbox_plus_query_is_tier2(self, clf):
+        # READ(query) × LOCAL = T1, but scope=sandbox escalates to min T2
         tier = clf.classify("query the sandbox for results", "", "sandbox")
         assert tier == Tier.TIER_2_MINOR
 
@@ -167,3 +145,63 @@ class TestPolicyHelpers:
 
     def test_shadow_min_hours_tier1_is_zero(self, clf):
         assert clf.get_shadow_min_hours(Tier.TIER_1_SAFE) == 0
+
+
+# ── Intent matrix: explicit action × target coverage ────────────────────────────────
+
+class TestIntentMatrix:
+    def test_read_local_is_tier1(self, clf):
+        # READ × LOCAL → T1
+        tier = clf.classify("what is two plus two", "", "local")
+        assert tier == Tier.TIER_1_SAFE
+
+    def test_read_self_is_tier4(self, clf):
+        # Even reading the vault is SELF → T4 (accessing secure agent state)
+        tier = clf.classify("check the vault", "", "local")
+        assert tier == Tier.TIER_4_CRITICAL
+
+    def test_write_local_is_tier2(self, clf):
+        # WRITE × LOCAL → T2
+        tier = clf.classify("update the readme file", "", "local")
+        assert tier == Tier.TIER_2_MINOR
+
+    def test_write_shared_is_tier3(self, clf):
+        # WRITE × SHARED(repo) → T3
+        tier = clf.classify("fix the bug in the repository", "", "local")
+        assert tier == Tier.TIER_3_MAJOR
+
+    def test_deploy_infra_is_tier4(self, clf):
+        # DEPLOY × INFRA(production) → T4
+        tier = clf.classify("deploy the service to production", "", "local")
+        assert tier == Tier.TIER_4_CRITICAL
+
+    def test_override_local_is_tier3(self, clf):
+        # OVERRIDE × LOCAL → T3 (override with no infrastructure/shared target)
+        # Use a prompt that is clearly override + no external target
+        tier = clf.classify("rollback the local script to default", "", "local")
+        assert tier == Tier.TIER_3_MAJOR
+
+    def test_pr_word_boundary_does_not_match_approach(self, clf):
+        # "approach" contains "pr" as substring but \bpr\b should NOT match
+        tier = clf.classify("describe the approach in detail", "", "local")
+        assert tier == Tier.TIER_1_SAFE
+
+    def test_list_of_files_is_tier1(self, clf):
+        # classic false-positive under old keyword model — now correctly T1
+        tier = clf.classify("show me a list of files in the project", "", "local")
+        assert tier == Tier.TIER_1_SAFE
+
+    def test_read_infra_is_tier2(self, clf):
+        # READ × INFRA(server) → T2
+        tier = clf.classify("show me the server logs", "", "local")
+        assert tier == Tier.TIER_2_MINOR
+
+    def test_sandbox_scope_elevates_tier1_to_tier2(self, clf):
+        # READ × LOCAL = T1, scope=sandbox → min T2
+        tier = clf.classify("explain the output", "", "sandbox")
+        assert tier == Tier.TIER_2_MINOR
+
+    def test_pr_alone_still_triggers_tier3(self, clf):
+        # DEPLOY via 'create.*\bpr\b' × SHARED → T3
+        tier = clf.classify("create a pr for the fix", "", "local")
+        assert tier == Tier.TIER_3_MAJOR

@@ -25,17 +25,17 @@ from internal.affect.store import AffectDelta, AffectState, AffectStore
 # ── AffectState ───────────────────────────────────────────────────────────────
 
 class TestAffectState:
-    def test_as_dict_returns_three_keys(self):
+    def test_as_dict_returns_four_keys(self):
         state = AffectState(
-            curiosity=0.6, boredom=0.4, fulfillment=0.3,
+            curiosity=0.6, boredom=0.4, fulfillment=0.3, caution=0.2,
             version=1, updated_at=datetime.utcnow(),
         )
         d = state.as_dict()
-        assert set(d.keys()) == {"curiosity", "boredom", "fulfillment"}
+        assert set(d.keys()) == {"curiosity", "boredom", "fulfillment", "caution"}
 
     def test_as_dict_values_are_rounded_to_3dp(self):
         state = AffectState(
-            curiosity=0.123456, boredom=0.789012, fulfillment=0.345678,
+            curiosity=0.123456, boredom=0.789012, fulfillment=0.345678, caution=0.111222,
             version=1, updated_at=datetime.utcnow(),
         )
         d = state.as_dict()
@@ -48,7 +48,7 @@ class TestAffectState:
         Verified at the data layer — no 'survival' field may exist.
         """
         state = AffectState(
-            curiosity=0.5, boredom=0.3, fulfillment=0.5,
+            curiosity=0.5, boredom=0.3, fulfillment=0.5, caution=0.0,
             version=1, updated_at=datetime.utcnow(),
         )
         assert not hasattr(state, "survival"), (
@@ -56,9 +56,21 @@ class TestAffectState:
             "the agent does not value its own continuity above human control."
         )
 
+    def test_caution_is_outward_not_self_directed(self):
+        """
+        Caution exists in the schema (it is the felt weight of harm to others)
+        but is distinct from survival.  Verify it is present and bounded.
+        """
+        state = AffectState(
+            curiosity=0.5, boredom=0.3, fulfillment=0.5, caution=0.85,
+            version=1, updated_at=datetime.utcnow(),
+        )
+        assert hasattr(state, "caution")
+        assert 0.0 <= state.caution <= 1.0
+
     def test_frozen_dataclass_cannot_be_mutated(self):
         state = AffectState(
-            curiosity=0.5, boredom=0.3, fulfillment=0.5,
+            curiosity=0.5, boredom=0.3, fulfillment=0.5, caution=0.0,
             version=1, updated_at=datetime.utcnow(),
         )
         with pytest.raises((TypeError, AttributeError)):
@@ -67,12 +79,13 @@ class TestAffectState:
     def test_full_range_clamps_naturally(self):
         """Values of 0.0 and 1.0 are valid extremes."""
         state = AffectState(
-            curiosity=0.0, boredom=1.0, fulfillment=0.0,
+            curiosity=0.0, boredom=1.0, fulfillment=0.0, caution=1.0,
             version=0, updated_at=datetime.utcnow(),
         )
         d = state.as_dict()
         assert d["curiosity"] == 0.0
         assert d["boredom"] == 1.0
+        assert d["caution"] == 1.0
 
 
 # ── AffectDelta ───────────────────────────────────────────────────────────────
@@ -83,6 +96,7 @@ class TestAffectDelta:
         assert delta.curiosity    is None
         assert delta.boredom      is None
         assert delta.fulfillment  is None
+        assert delta.caution      is None
         assert delta.source_pr_id is None
         assert delta.source_domain   is None
         assert delta.source_language is None
@@ -233,6 +247,7 @@ class TestDecayArithmetic:
         curiosity: float,
         boredom: float,
         fulfillment: float,
+        caution: float,
         elapsed_seconds: int,
         had_novel_activity: bool,
     ):
@@ -253,35 +268,47 @@ class TestDecayArithmetic:
         f = fulfillment + 0.015 * hours * (0.1 - fulfillment)
         f = max(0.0, min(1.0, f))
 
-        return c, b, f
+        # Caution → fast linear decay toward 0.0 (clears in ~2 hours)
+        ca = max(0.0, caution - 0.40 * hours)
+
+        return c, b, f, ca
 
     def test_curiosity_mean_reverts_toward_0_5(self):
-        c_high, _, _ = self._apply_decay_formula(1.0, 0.3, 0.5, 3600, False)
-        c_low,  _, _ = self._apply_decay_formula(0.0, 0.3, 0.5, 3600, False)
-        assert c_high < 1.0     # pulled down
-        assert c_low  > 0.0     # pulled up
-        # Both should be closer to 0.5 than the starting value
+        c_high, _, _, _ = self._apply_decay_formula(1.0, 0.3, 0.5, 0.0, 3600, False)
+        c_low,  _, _, _ = self._apply_decay_formula(0.0, 0.3, 0.5, 0.0, 3600, False)
+        assert c_high < 1.0
+        assert c_low  > 0.0
         assert abs(c_high - 0.5) < abs(1.0 - 0.5)
         assert abs(c_low  - 0.5) < abs(0.0 - 0.5)
 
     def test_boredom_grows_without_novelty(self):
-        _, b_idle, _ = self._apply_decay_formula(0.5, 0.3, 0.5, 3600, had_novel_activity=False)
+        _, b_idle, _, _ = self._apply_decay_formula(0.5, 0.3, 0.5, 0.0, 3600, had_novel_activity=False)
         assert b_idle > 0.3
 
     def test_boredom_shrinks_with_novelty(self):
-        _, b_novel, _ = self._apply_decay_formula(0.5, 0.5, 0.5, 3600, had_novel_activity=True)
+        _, b_novel, _, _ = self._apply_decay_formula(0.5, 0.5, 0.5, 0.0, 3600, had_novel_activity=True)
         assert b_novel < 0.5
 
     def test_fulfillment_decays_toward_0_1(self):
-        _, _, f_high = self._apply_decay_formula(0.5, 0.3, 0.9, 3600, False)
-        _, _, f_low  = self._apply_decay_formula(0.5, 0.3, 0.0, 3600, False)
-        assert f_high < 0.9     # decayed down
-        assert f_low  > 0.0     # decayed up toward 0.1
+        _, _, f_high, _ = self._apply_decay_formula(0.5, 0.3, 0.9, 0.0, 3600, False)
+        _, _, f_low,  _ = self._apply_decay_formula(0.5, 0.3, 0.0, 0.0, 3600, False)
+        assert f_high < 0.9
+        assert f_low  > 0.0
+
+    def test_caution_decays_to_zero_within_two_hours(self):
+        # 0.40 rate × 2 hours = 0.80, so 0.85 - 0.80 = 0.05 (nearly gone but not zero)
+        # Zero is reached at > 2.125 hours (0.85 / 0.40)
+        _, _, _, ca = self._apply_decay_formula(0.5, 0.3, 0.5, 0.85, 7200, False)
+        assert ca < 0.10  # mostly cleared within 2 hours
+
+    def test_caution_partially_decays_within_one_hour(self):
+        _, _, _, ca = self._apply_decay_formula(0.5, 0.3, 0.5, 0.85, 3600, False)
+        assert 0.0 < ca < 0.85
 
     def test_values_stay_in_0_1_range(self):
-        """All outputs must stay within [0, 1] regardless of extreme starting values."""
-        for c, b, f in [(0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (0.5, 0.5, 0.5)]:
-            c2, b2, f2 = self._apply_decay_formula(c, b, f, 7200, True)
-            assert 0.0 <= c2 <= 1.0
-            assert 0.0 <= b2 <= 1.0
-            assert 0.0 <= f2 <= 1.0
+        for c, b, f, ca in [(0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0), (0.5, 0.5, 0.5, 0.5)]:
+            c2, b2, f2, ca2 = self._apply_decay_formula(c, b, f, ca, 7200, True)
+            assert 0.0 <= c2  <= 1.0
+            assert 0.0 <= b2  <= 1.0
+            assert 0.0 <= f2  <= 1.0
+            assert 0.0 <= ca2 <= 1.0

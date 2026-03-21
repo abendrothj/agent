@@ -182,6 +182,8 @@ CREATE TABLE IF NOT EXISTS agent_affect (
                         CHECK (boredom      BETWEEN 0.000 AND 1.000),
     fulfillment     NUMERIC(5,3) NOT NULL DEFAULT 0.200
                         CHECK (fulfillment  BETWEEN 0.000 AND 1.000),
+    caution         NUMERIC(5,3) NOT NULL DEFAULT 0.000
+                        CHECK (caution      BETWEEN 0.000 AND 1.000),
 
     -- NOTE: There is intentionally no `survival` or `self_preservation` field.
     -- The agent does not value its own continuity above its purpose or above
@@ -206,6 +208,7 @@ CREATE TABLE IF NOT EXISTS affect_events (
     delta_curiosity     NUMERIC(5,3),
     delta_boredom       NUMERIC(5,3),
     delta_fulfillment   NUMERIC(5,3),
+    delta_caution       NUMERIC(5,3),
 
     -- Context fields — what triggered this?
     source_pr_id    TEXT,           -- "owner/repo#42", NULL for non-PR events
@@ -302,9 +305,11 @@ CREATE TABLE IF NOT EXISTS affect_decay_log (
     before_curiosity    NUMERIC(5,3) NOT NULL,
     before_boredom      NUMERIC(5,3) NOT NULL,
     before_fulfillment  NUMERIC(5,3) NOT NULL,
+    before_caution      NUMERIC(5,3) NOT NULL,
     after_curiosity     NUMERIC(5,3) NOT NULL,
     after_boredom       NUMERIC(5,3) NOT NULL,
     after_fulfillment   NUMERIC(5,3) NOT NULL,
+    after_caution       NUMERIC(5,3) NOT NULL,
     elapsed_seconds     INTEGER      NOT NULL,
     ran_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );

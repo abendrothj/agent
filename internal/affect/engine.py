@@ -205,7 +205,39 @@ def user_slack_approved() -> AffectDelta:
     )
 
 
-# ── Temperature mapping ───────────────────────────────────────────────────────
+E_CAUTION = "caution"   # outward-directed concern, set at classification time
+
+
+def signal_caution(tier: int) -> AffectDelta:
+    """
+    Outward-directed concern proportional to tier.
+
+    This is NOT self-preservation — the agent is not afraid for itself.
+    It is the felt weight of potential consequences for others: a Tier 4
+    action can harm infrastructure, data, or trust in ways that are hard
+    to reverse.  That weight should be felt, not ignored.
+
+    The signal is set at classification time and decays within ~2 hours
+    via the decay loop.  It does not accumulate across unrelated requests.
+
+    Effect: caution drives temperature DOWN (more deliberate output) and
+    top_p DOWN (narrower sampling) proportional to risk level.
+
+      Tier 1 → 0.05  (background hum — nearly absent)
+      Tier 2 → 0.20
+      Tier 3 → 0.50
+      Tier 4 → 0.85  (full weight of consequence)
+    """
+    _intensity = {1: 0.05, 2: 0.20, 3: 0.50, 4: 0.85}
+    intensity = _intensity.get(int(tier), 0.05)
+    return AffectDelta(
+        event_type=f"{E_CAUTION}_tier_{int(tier)}",
+        caution=intensity,
+        narrative=(
+            f"Tier {int(tier)} request. "
+            "The potential consequences for others are weighed."
+        ),
+    )
 
 def compute_temperature(state: AffectState, base: float = 0.7) -> float:
     """
@@ -221,15 +253,17 @@ def compute_temperature(state: AffectState, base: float = 0.7) -> float:
       High boredom    → do something different, push past the obvious answer
       High fulfillment → current approach is working well, be more precise
       Low fulfillment  → something isn't working, shake it up
+      High caution    → be deliberate; tighter output for high-stakes actions
 
     Formula:
       curiosity_push  = (curiosity  - 0.5) * 0.30   [-0.15 .. +0.15]
       boredom_push    = (boredom    - 0.3) * 0.20   [-0.06 .. +0.14]
       fulfillment_pull= (fulfillment- 0.5) * -0.15  [-0.075 .. +0.075]
+      caution_pull    = caution * -0.25              [-0.25 .. 0]
       temperature     = clamp(base + sum, 0.10, 1.40)
 
     Result stays in [0.10, 1.40]:
-      0.10–0.40 → precise / deterministic (familiar territory, high fulfillment)
+      0.10–0.40 → precise / deterministic (high fulfillment, or high caution)
       0.40–0.80 → balanced (healthy working state)
       0.80–1.20 → exploratory (curious, bored, seeking novelty)
       1.20–1.40 → maximum exploration (very bored + very curious)
@@ -240,8 +274,9 @@ def compute_temperature(state: AffectState, base: float = 0.7) -> float:
     curiosity_push   = (state.curiosity   - 0.5) *  0.30
     boredom_push     = (state.boredom     - 0.3) *  0.20
     fulfillment_pull = (state.fulfillment - 0.5) * -0.15
+    caution_pull     =  state.caution              * -0.25
 
-    raw = base + curiosity_push + boredom_push + fulfillment_pull
+    raw = base + curiosity_push + boredom_push + fulfillment_pull + caution_pull
     return round(max(0.10, min(1.40, raw)), 3)
 
 
@@ -256,8 +291,9 @@ def compute_top_p(state: AffectState, base: float = 0.9) -> float:
     """
     boredom_push     = (state.boredom    - 0.3) *  0.10
     fulfillment_pull = (state.fulfillment- 0.5) * -0.08
+    caution_pull     =  state.caution            * -0.10
 
-    raw = base + boredom_push + fulfillment_pull
+    raw = base + boredom_push + fulfillment_pull + caution_pull
     return round(max(0.70, min(0.98, raw)), 3)
 
 
@@ -274,7 +310,8 @@ def summarise_inference_params(state: AffectState, base_temp: float = 0.7) -> di
         "affect":      state.as_dict(),
         "reasoning": (
             f"curiosity={state.curiosity:.2f} boredom={state.boredom:.2f} "
-            f"fulfillment={state.fulfillment:.2f} → temperature={temp} top_p={top_p}"
+            f"fulfillment={state.fulfillment:.2f} caution={state.caution:.2f} "
+            f"→ temperature={temp} top_p={top_p}"
         ),
     }
 

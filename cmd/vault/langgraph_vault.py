@@ -18,6 +18,8 @@ from internal.memory.ledger.store import LedgerStore
 from internal.memory.context.manager import ContextManager
 from internal.memory.graph.client import GraphRAGClient
 from internal.mcp.client import MCPContextProvider
+from internal.affect.engine import signal_caution
+from internal.affect.store import AffectStore
 
 try:
     from langgraph.graph import StateGraph, END
@@ -115,6 +117,9 @@ def node_classify(state: VaultState, config: dict) -> dict:
     If MCP sensory context was gathered in node_sense_context, it is prepended
     to system_context before the classifier sees it — giving the classifier the
     same multi-modal awareness a human expert would have when reading a PR.
+
+    After classification, fires signal_caution(tier) into the affect store if
+    one is available — the outward-directed concern proportional to risk level.
     """
     classifier: RiskClassifier = config["configurable"]["classifier"]
 
@@ -129,6 +134,17 @@ def node_classify(state: VaultState, config: dict) -> dict:
         state.get("scope", "local"),
     )
     logger.info(f"[classify] {state['request_id']} → Tier {tier}")
+
+    # Fire caution signal into affect store (non-blocking, fire-and-forget)
+    affect_store: Optional[AffectStore] = config["configurable"].get("affect_store")
+    if affect_store is not None:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(affect_store.apply_delta(signal_caution(int(tier))))
+        except Exception:
+            pass  # affect store failure must never block the classification path
+
     return {
         "tier": int(tier),
         "checkpoints": [f"classified:tier_{tier}"],
@@ -457,11 +473,13 @@ class LangGraphVault:
         context: ContextManager,
         graph_client: GraphRAGClient,
         mcp_provider: Optional["MCPContextProvider"] = None,
+        affect_store: Optional[AffectStore] = None,
     ):
         self.ledger = ledger
         self.context = context
         self.graph_client = graph_client
         self.mcp_provider = mcp_provider
+        self.affect_store = affect_store
         self.classifier = RiskClassifier()
         self._graph = None
         self._checkpointer = None
@@ -505,6 +523,7 @@ class LangGraphVault:
                 "context": self.context,
                 "graph_client": self.graph_client,
                 "mcp_provider": self.mcp_provider,  # Thalamus — None = senses disabled
+                "affect_store": self.affect_store,  # Caution signal target
             }
         }
 
@@ -558,6 +577,7 @@ class LangGraphVault:
                 "context": self.context,
                 "graph_client": self.graph_client,
                 "mcp_provider": self.mcp_provider,
+                "affect_store": self.affect_store,
             }
         }
 
