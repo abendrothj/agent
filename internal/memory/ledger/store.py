@@ -1,6 +1,7 @@
 """
 Ledger Store - Immutable action log for decision audit trail
 """
+import json
 import logging
 import uuid
 from typing import List, Dict, Any, Optional
@@ -96,9 +97,9 @@ class LedgerStore:
                 """
                 INSERT INTO ledger_entries 
                 (id, timestamp_ms, action_type, actor_id, request_id, details, signature, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                 """,
-                (entry_id, now_ms, action_type, actor_id, request_id, details, signature, metadata),
+                (entry_id, now_ms, action_type, actor_id, request_id, details, signature, json.dumps(metadata)),
             )
             logger.info(f"Ledger entry {entry_id}: {action_type} by {actor_id}")
             return entry_id
