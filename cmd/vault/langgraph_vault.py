@@ -26,6 +26,7 @@ try:
     from langgraph.graph.message import add_messages
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     from langgraph.types import interrupt, Command
+    from langchain_core.runnables import RunnableConfig
     _LANGGRAPH_OK = True
 except ImportError:
     # Node functions are importable and testable without LangGraph.
@@ -35,6 +36,7 @@ except ImportError:
     AsyncPostgresSaver = None  # type: ignore[assignment,misc]
     interrupt = None   # type: ignore[assignment]
     Command = None     # type: ignore[assignment,misc]
+    RunnableConfig = dict  # type: ignore[assignment,misc]
     _LANGGRAPH_OK = False
 
 try:
@@ -87,7 +89,7 @@ class VaultState(TypedDict):
 # Node implementations
 # ---------------------------------------------------------------------------
 
-async def node_sense_context(state: VaultState, config: dict) -> dict:
+async def node_sense_context(state: VaultState, config: RunnableConfig) -> dict:
     """
     Primary sensory cortex — first cortical processing of peripheral input.
 
@@ -111,7 +113,7 @@ async def node_sense_context(state: VaultState, config: dict) -> dict:
     return {"mcp_context": ctx, "checkpoints": [label]}
 
 
-def node_classify(state: VaultState, config: dict) -> dict:
+def node_classify(state: VaultState, config: RunnableConfig) -> dict:
     """Classify the request into risk Tier 1-4 using RiskClassifier.
 
     If MCP sensory context was gathered in node_sense_context, it is prepended
@@ -151,7 +153,7 @@ def node_classify(state: VaultState, config: dict) -> dict:
     }
 
 
-async def node_check_rejection_cache(state: VaultState, config: dict) -> dict:
+async def node_check_rejection_cache(state: VaultState, config: RunnableConfig) -> dict:
     """Tier 4 only — auto-block if identical request rejected within 24h"""
     ledger: LedgerStore = config["configurable"]["ledger"]
 
@@ -163,7 +165,7 @@ async def node_check_rejection_cache(state: VaultState, config: dict) -> dict:
     }
 
 
-async def node_check_rate_limit(state: VaultState, config: dict) -> dict:
+async def node_check_rate_limit(state: VaultState, config: RunnableConfig) -> dict:
     """Enforce per-tier hourly rate limits via Redis session"""
     context: ContextManager = config["configurable"]["context"]
     tier = state["tier"]
@@ -186,7 +188,7 @@ async def node_check_rate_limit(state: VaultState, config: dict) -> dict:
     }
 
 
-async def node_query_graph_memory(state: VaultState, config: dict) -> dict:
+async def node_query_graph_memory(state: VaultState, config: RunnableConfig) -> dict:
     """
     Query GraphRAG for failure patterns similar to this request.
     Adds a warning to state if a matching failure pattern exists — the
@@ -210,7 +212,7 @@ async def node_query_graph_memory(state: VaultState, config: dict) -> dict:
     return result
 
 
-async def node_validate_token(state: VaultState, config: dict) -> dict:
+async def node_validate_token(state: VaultState, config: RunnableConfig) -> dict:
     """Validate approval token — checks format, MFA flag, and expiry"""
     classifier: RiskClassifier = config["configurable"]["classifier"]
     token = state.get("approval_token")
@@ -226,7 +228,7 @@ async def node_validate_token(state: VaultState, config: dict) -> dict:
     return {"token_valid": True, "checkpoints": ["token:valid"]}
 
 
-async def node_check_shadow_baseline(state: VaultState, config: dict) -> dict:
+async def node_check_shadow_baseline(state: VaultState, config: RunnableConfig) -> dict:
     """
     For Tier 3/4 with no pre-approved token: check whether Shadow has
     collected a baseline of sufficient age and semantic quality.
@@ -251,7 +253,7 @@ async def node_check_shadow_baseline(state: VaultState, config: dict) -> dict:
     }
 
 
-async def node_request_human_approval(state: VaultState, config: dict) -> dict:
+async def node_request_human_approval(state: VaultState, config: RunnableConfig) -> dict:
     """
     Pause graph execution and wait for human MFA approval.
     LangGraph's `interrupt()` suspends this run; the caller resumes it
@@ -279,7 +281,7 @@ async def node_request_human_approval(state: VaultState, config: dict) -> dict:
     }
 
 
-async def node_approve(state: VaultState, config: dict) -> dict:
+async def node_approve(state: VaultState, config: RunnableConfig) -> dict:
     """Write approval to immutable ledger and mark state approved"""
     ledger: LedgerStore = config["configurable"]["ledger"]
 
@@ -303,7 +305,7 @@ async def node_approve(state: VaultState, config: dict) -> dict:
     return {"approved": True, "reason": reason, "checkpoints": ["decision:approved"]}
 
 
-async def node_reject(state: VaultState, config: dict) -> dict:
+async def node_reject(state: VaultState, config: RunnableConfig) -> dict:
     """Write rejection to immutable ledger and mark state rejected"""
     ledger: LedgerStore = config["configurable"]["ledger"]
 
