@@ -18,6 +18,7 @@ from internal.memory.ledger.store import LedgerStore
 from internal.memory.context.manager import ContextManager
 from internal.memory.graph.client import GraphRAGClient
 from internal.mcp.client import MCPContextProvider
+from internal.git.identity import GitIdentity
 from cmd.vault.langgraph_vault import LangGraphVault
 
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +54,7 @@ class VaultService:
         self.graph_client: Optional[GraphRAGClient] = None
         self._mcp_provider: Optional[MCPContextProvider] = None
         self._lg_vault: Optional[LangGraphVault] = None
+        self._git_identity: GitIdentity = GitIdentity()
 
     async def initialize(self):
         """Initialize Vault services"""
@@ -97,6 +99,9 @@ class VaultService:
             mcp_provider=self._mcp_provider,
         )
         await self._lg_vault.initialize()
+
+        # Git identity — generates SSH keypair on first boot, prints pub key to logs
+        await self._git_identity.initialize()
 
         logger.info("Vault Service initialized successfully")
     
