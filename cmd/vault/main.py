@@ -19,7 +19,9 @@ from internal.memory.context.manager import ContextManager
 from internal.memory.graph.client import GraphRAGClient
 from internal.mcp.client import MCPContextProvider
 from internal.git.identity import GitIdentity
+from internal.git.github_client import GitHubClient
 from cmd.vault.langgraph_vault import LangGraphVault
+from cmd.vault.autonomy_loop import AutonomyLoop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,6 +57,8 @@ class VaultService:
         self._mcp_provider: Optional[MCPContextProvider] = None
         self._lg_vault: Optional[LangGraphVault] = None
         self._git_identity: GitIdentity = GitIdentity()
+        self._github_client: GitHubClient = GitHubClient()
+        self._autonomy_loop: Optional[AutonomyLoop] = None
 
     async def initialize(self):
         """Initialize Vault services"""
@@ -103,11 +107,23 @@ class VaultService:
         # Git identity — generates SSH keypair on first boot, prints pub key to logs
         await self._git_identity.initialize()
 
+        # Autonomy loop — self-directed contribution drive (affect-gated)
+        self._autonomy_loop = AutonomyLoop(
+            graph_client=self.graph_client,
+            github_client=self._github_client,
+            identity=self._git_identity,
+            vault_service=self,
+            affect_store=None,   # wired in after affect store is available
+        )
+        self._autonomy_loop.start()
+
         logger.info("Vault Service initialized successfully")
     
     async def shutdown(self):
         """Graceful shutdown"""
         logger.info("Shutting down Vault Service...")
+        if self._autonomy_loop:
+            await self._autonomy_loop.stop()
         if self._lg_vault:
             await self._lg_vault.teardown()
         if self.ledger:
