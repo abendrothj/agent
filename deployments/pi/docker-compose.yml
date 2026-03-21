@@ -140,6 +140,7 @@ services:
     environment:
       VAULT_HOST: vault
       VAULT_PORT: 50051
+      TLS_SERVER_NAME: pi-vault   # CN in client.crt — overrides gRPC hostname verification
       CERT_FILE: /run/certs/client.crt
       KEY_FILE: /run/certs/client.key
       CA_CERT: /run/certs/client.crt   # vault server presents client.crt; API must trust it

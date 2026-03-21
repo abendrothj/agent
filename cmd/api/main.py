@@ -46,10 +46,13 @@ logger = logging.getLogger(__name__)
 
 VAULT_HOST = os.getenv("VAULT_HOST", "vault")
 VAULT_PORT = int(os.getenv("VAULT_PORT", "50051"))
+# CN in the vault's server cert (client.crt) — used to override gRPC hostname
+# verification so it matches CN=pi-vault rather than the Docker DNS name "vault"
+TLS_SERVER_NAME     = os.getenv("TLS_SERVER_NAME", "pi-vault")
 
 CERT_FILE           = os.getenv("CERT_FILE", "/run/certs/client.crt")
 KEY_FILE            = os.getenv("KEY_FILE",  "/run/certs/client.key")
-CA_CERT             = os.getenv("CA_CERT",   "/run/certs/muscle.crt")
+CA_CERT             = os.getenv("CA_CERT",   "/run/certs/client.crt")
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")  # From Slack App settings
 
@@ -62,7 +65,8 @@ def _build_channel() -> grpc.Channel:
             private_key=open(KEY_FILE, "rb").read(),
             certificate_chain=open(CERT_FILE, "rb").read(),
         )
-        return grpc.secure_channel(f"{VAULT_HOST}:{VAULT_PORT}", creds)
+        options = [("grpc.ssl_target_name_override", TLS_SERVER_NAME)]
+        return grpc.secure_channel(f"{VAULT_HOST}:{VAULT_PORT}", creds, options=options)
     except FileNotFoundError:
         # No certs yet (dev mode) — fall back to insecure
         logger.warning("TLS certs not found — connecting to Vault without mTLS (dev only)")
