@@ -139,7 +139,7 @@ services:
       VAULT_PORT: 50051
       CERT_FILE: /run/certs/client.crt
       KEY_FILE: /run/certs/client.key
-      CA_CERT: /run/certs/muscle.crt
+      CA_CERT: /run/certs/client.crt   # vault server presents client.crt; API must trust it
       API_KEY: ${API_KEY:-}      # Leave blank to disable auth, or set in .env
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
       LOG_LEVEL: INFO
@@ -238,7 +238,8 @@ services:
     ports:
       - "50055:50055"
     networks:
-      - sandbox_net
+      - vault_net      # needs postgres (on vault_net) for ledger/metrics writes
+      - sandbox_net    # isolated from Neo4j/Redis; muscle reached via MUSCLE_HOST LAN IP
     depends_on:
       postgres:
         condition: service_healthy
