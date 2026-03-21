@@ -483,6 +483,7 @@ class LangGraphVault:
         self.classifier = RiskClassifier()
         self._graph = None
         self._checkpointer = None
+        self._checkpointer_cm = None  # context manager — kept open for service lifetime
 
     async def initialize(self):
         """Set up PostgreSQL-backed checkpointer and compile graph"""
@@ -490,10 +491,21 @@ class LangGraphVault:
             raise RuntimeError(
                 "LangGraph not installed. Run: pip install langgraph langgraph-checkpoint-postgres"
             )
-        self._checkpointer = AsyncPostgresSaver.from_conn_string(self.DB_DSN)
+        # AsyncPostgresSaver.from_conn_string() is an async context manager in
+        # langgraph-checkpoint-postgres >=2.x.  Enter it here and hold it open
+        # for the service lifetime; close it in teardown().
+        self._checkpointer_cm = AsyncPostgresSaver.from_conn_string(self.DB_DSN)
+        self._checkpointer = await self._checkpointer_cm.__aenter__()
         await self._checkpointer.setup()
         self._graph = build_vault_graph(self._checkpointer)
         logger.info("LangGraph Vault initialized with PostgreSQL checkpointer")
+
+    async def teardown(self):
+        """Close the checkpointer connection — call from VaultService.shutdown()"""
+        if self._checkpointer_cm is not None:
+            await self._checkpointer_cm.__aexit__(None, None, None)
+            self._checkpointer_cm = None
+            self._checkpointer = None
 
     async def process_request(
         self,

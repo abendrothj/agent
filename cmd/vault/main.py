@@ -103,6 +103,8 @@ class VaultService:
     async def shutdown(self):
         """Graceful shutdown"""
         logger.info("Shutting down Vault Service...")
+        if self._lg_vault:
+            await self._lg_vault.teardown()
         if self.ledger:
             await self.ledger.disconnect()
         if self.context:
