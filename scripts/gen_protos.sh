@@ -32,6 +32,7 @@ PROTOS=(
     sandbox.proto
     memory.proto
     watchdog.proto
+    muscle.proto
 )
 
 for proto in "${PROTOS[@]}"; do
