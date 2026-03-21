@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements-watchdog.txt .
 RUN pip install --no-cache-dir -r requirements-watchdog.txt
 
+COPY cmd/__init__.py /app/cmd/__init__.py
 COPY cmd/watchdog /app/cmd/watchdog
 COPY internal /app/internal
 

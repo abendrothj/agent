@@ -3,7 +3,6 @@ syntax = "proto3";
 package memory.v1;
 
 option go_package = "github.com/ja/agent/internal/api/memory";
-option python_package = "memory.v1";
 
 // VectorEntry represents a semantic memory fact (PR, failure, etc.)
 message VectorEntry {

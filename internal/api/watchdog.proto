@@ -3,7 +3,6 @@ syntax = "proto3";
 package watchdog.v1;
 
 option go_package = "github.com/ja/agent/internal/api/watchdog";
-option python_package = "watchdog.v1";
 
 // WatchdogService: Health monitor and rollback controller on Pi
 // =============================================================

@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements-sandbox.txt .
 RUN pip install --no-cache-dir -r requirements-sandbox.txt
 
+COPY cmd/__init__.py /app/cmd/__init__.py
 COPY cmd/sandbox-agent /app/cmd/sandbox_agent
 COPY internal /app/internal
 

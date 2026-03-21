@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements-api.txt
 COPY internal/api/vault_pb2.py      ./cmd/api/vault_pb2.py
 COPY internal/api/vault_pb2_grpc.py ./cmd/api/vault_pb2_grpc.py
 
+COPY cmd/__init__.py ./cmd/__init__.py
 COPY cmd/api/ ./cmd/api/
 
 ENV PYTHONPATH=/app

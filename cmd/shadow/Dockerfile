@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements-shadow.txt .
 RUN pip install --no-cache-dir -r requirements-shadow.txt
 
+COPY cmd/__init__.py /app/cmd/__init__.py
 COPY cmd/shadow /app/cmd/shadow
 COPY internal /app/internal
 

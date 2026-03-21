@@ -16,6 +16,7 @@ COPY requirements-vault.txt .
 RUN pip install --no-cache-dir -r requirements-vault.txt
 
 # Copy code
+COPY cmd/__init__.py /app/cmd/__init__.py
 COPY cmd/vault /app/cmd/vault
 COPY internal /app/internal
 COPY configs /app/configs

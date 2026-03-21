@@ -3,7 +3,6 @@ syntax = "proto3";
 package sandbox.v1;
 
 option go_package = "github.com/ja/agent/internal/api/sandbox";
-option python_package = "sandbox.v1";
 
 // ExecutionMetrics tracks performance during sandbox runs
 message ExecutionMetrics {
