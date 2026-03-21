@@ -101,7 +101,10 @@ services:
       # mTLS — certificates from /opt/teammate-vault/certs/ (see PI_SETUP.md)
       CERT_FILE: /run/certs/client.crt
       KEY_FILE: /run/certs/client.key
-      CA_CERT: /run/certs/muscle.crt
+      # CA_CERT for the vault gRPC SERVER: verifies incoming client certs.
+      # All Pi-internal callers (api, shadow, watchdog) present client.crt.
+      # Vault never receives inbound calls from muscle (vault calls muscle, not vice versa).
+      CA_CERT: /run/certs/client.crt
       # Git autonomy identity
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_USERNAME: ${GITHUB_USERNAME:-teammate-agent}
