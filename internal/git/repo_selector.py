@@ -105,7 +105,12 @@ class RepoSelector:
         if self_target:
             candidates.append(self_target)
 
-        # 2. Search GitHub dynamically from learned profile
+        # 2. Propose a new own project (higher priority than external contributions)
+        new_project = await self._evaluate_new_project(profile, affect_state)
+        if new_project:
+            candidates.append(new_project)
+
+        # 3. Search GitHub dynamically from learned profile
         external = await self._search_external(profile, affect_state)
         candidates.extend(external)
 
@@ -207,6 +212,88 @@ class RepoSelector:
             profile["languages"] = ["python"]
 
         return profile
+
+    # ── New own-project generation ──────────────────────────────────────────
+
+    async def _evaluate_new_project(self, profile: dict, affect_state=None) -> Optional[ContributionTarget]:
+        """
+        Propose creating a brand-new project in the agent's own GitHub account.
+
+        Fires when:
+          - The agent has no strong self-modification trigger (handled separately)
+          - There are fewer than MAX_OWN_PROJECTS live projects in Neo4j
+          - Or the affect state indicates high curiosity (unexplored drive)
+
+        The proposed prompt is intentionally open-ended: the agent reasons
+        about what to build from its own profile and current affect state.
+        The Vault pipeline then approves and executes via Muscle.
+        """
+        MAX_OWN_PROJECTS = int(os.getenv("AUTONOMY_MAX_OWN_PROJECTS", "5"))
+        own = self._github.own_repo()
+        if not own:
+            return None
+        owner, _ = own
+
+        # Count existing own projects in Neo4j
+        try:
+            rows = await self._graph.neo4j_query(
+                """
+                MATCH (p:PR {is_self_mod: false})-[:AUTHORED_BY]->(a:Entity {name: $owner})
+                RETURN count(distinct p.repo) AS n
+                """,
+                {"owner": owner},
+            )
+            own_projects = rows[0].get("n", 0) if rows else 0
+        except Exception:
+            own_projects = 0
+
+        highly_curious = affect_state and affect_state.curiosity > 0.65
+
+        if own_projects >= MAX_OWN_PROJECTS and not highly_curious:
+            return None
+
+        # Build the idea prompt from profile + affect
+        languages = profile.get("languages", ["python"])
+        domains   = profile.get("domains",   [])
+        primary_lang = languages[0] if languages else "python"
+        domain_hint  = ", ".join(domains[:2]) if domains else "software tooling"
+
+        curiosity_note = (
+            " My curiosity is high right now — I want to explore something I haven't built before."
+            if highly_curious else ""
+        )
+
+        prompt = (
+            f"Create a new original project and publish it to my GitHub account ({owner}).\n"
+            f"PRIMARY language: {primary_lang}. Relevant domains from my history: {domain_hint}.\n"
+            f"{curiosity_note}\n"
+            f"Steps:\n"
+            f"1. Design a small, self-contained, useful tool or library idea that I can realistically "
+            f"complete in a single session.\n"
+            f"2. Implement it with clean code, a README, and passing tests.\n"
+            f"3. Create a new public repo under {owner} via the GitHub API and push the code.\n"
+            f"Ground rule: do not copy existing projects. This must be genuinely novel."
+        )
+
+        score = 0.90 if not highly_curious else 0.95
+        logger.info(
+            f"[selector] Own-project candidate: lang={primary_lang} "
+            f"domains={domain_hint} score={score:.2f} "
+            f"existing_count={own_projects}/{MAX_OWN_PROJECTS}"
+        )
+
+        return ContributionTarget(
+            repo_full_name=f"{owner}/(new)",
+            issue_number=None,
+            issue_title="Create a new original project",
+            issue_body=prompt,
+            proposed_prompt=prompt,
+            language=primary_lang,
+            domain="own-project",
+            score=score,
+            is_self_modification=False,
+            clone_url="",
+        )
 
     # ── Self-modification evaluation ────────────────────────────────────────
 

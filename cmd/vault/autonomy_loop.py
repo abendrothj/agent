@@ -432,18 +432,22 @@ class AutonomyLoop:
         Send the contribution target's prompt through the Vault pipeline.
         If approved, perform the git operations and open a PR.
         """
-        logger.info(
-            f"[autonomy] Contributing to {target.repo_full_name} — "
-            f"{'self-mod' if target.is_self_modification else f'issue #{target.issue_number}'}"
+        is_own_project = target.domain == "own-project"
+        label = (
+            "new own project"
+            if is_own_project
+            else ("self-mod" if target.is_self_modification else f"issue #{target.issue_number}")
         )
+        logger.info(f"[autonomy] Contributing to {target.repo_full_name} — {label}")
 
         # Send through Vault's risk pipeline — same path as human prompts
         request_id = str(uuid.uuid4())
+        tier_hint  = 3 if target.is_self_modification else 2
         try:
             result = await self._vault.process_autonomous_request(
                 request_id=request_id,
                 prompt=target.proposed_prompt,
-                tier_hint=3 if target.is_self_modification else 2,
+                tier_hint=tier_hint,
             )
         except Exception as exc:
             logger.warning(f"[autonomy] Vault rejected or errored: {exc}")
@@ -451,6 +455,23 @@ class AutonomyLoop:
 
         if not result.get("approved"):
             logger.info(f"[autonomy] Vault did not approve — {result.get('reason')}")
+            return
+
+        # Own-project: Muscle handles the full build+publish; no local patch needed
+        if is_own_project:
+            logger.info(
+                f"[autonomy] Own-project task approved — Muscle will design, "
+                f"implement, and push the new repo"
+            )
+            if self._affect:
+                await self._affect.apply_delta(
+                    affect_engine.novel_domain_explored("own-project", target.language.lower())
+                )
+                self._had_novel_activity_since_decay = True
+                await self._affect.apply_delta(
+                    affect_engine.cycle_contributed("own-project", target.language.lower())
+                )
+            self._last_contribution = datetime.utcnow()
             return
 
         # Git operations: clone, branch, apply the generated code, push
