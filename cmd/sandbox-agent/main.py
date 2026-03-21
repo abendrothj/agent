@@ -10,6 +10,12 @@ import os
 import sys
 from pathlib import Path
 
+import socket
+import struct
+import time
+
+import grpc
+
 from internal.affect import engine as affect_engine
 from internal.affect.store import AffectStore
 from internal.memory.ledger.store import LedgerStore
@@ -25,6 +31,17 @@ import muscle_pb2_grpc  # noqa: E402
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _send_wol(mac: str) -> None:
+    """Send a Wake-on-LAN magic packet via UDP broadcast. No extra deps needed."""
+    mac_bytes = bytes.fromhex(mac.replace(":", "").replace("-", ""))
+    magic = b"\xff" * 6 + mac_bytes * 16
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.sendto(magic, ("255.255.255.255", 9))
+        s.sendto(magic, ("10.0.0.255", 9))   # directed broadcast on LAN subnet
+    logger.info(f"[sandbox] WoL magic packet sent to {mac}")
+
 # Static base temperature — affect state modulates around this
 _BASE_TEMPERATURE = float(os.getenv("BASE_TEMPERATURE", "0.7"))
 _BASE_TOP_P       = float(os.getenv("BASE_TOP_P",       "0.9"))
@@ -39,12 +56,18 @@ class SandboxService:
     DB_USER = os.getenv("SANDBOX_DB_USER", "sandbox")
     DB_PASSWORD = os.getenv("SANDBOX_DB_PASSWORD", "sandbox_secure_pass")
     
-    MUSCLE_HOST = os.getenv("MUSCLE_HOST", "192.168.1.100")
-    MUSCLE_PORT = int(os.getenv("MUSCLE_PORT", "50051"))
-    
+    MUSCLE_HOST    = os.getenv("MUSCLE_HOST",    "192.168.1.100")
+    MUSCLE_PORT    = int(os.getenv("MUSCLE_PORT", "50051"))
+    MUSCLE_TLS_SN  = os.getenv("MUSCLE_TLS_SERVER_NAME", "win11-muscle")
+    CERT_FILE      = os.getenv("CERT_FILE",      "/run/certs/client.crt")
+    KEY_FILE       = os.getenv("KEY_FILE",       "/run/certs/client.key")
+    MUSCLE_CA_CERT = os.getenv("MUSCLE_CA_CERT", "/run/certs/muscle.crt")
+    WIN11_MAC      = os.getenv("WIN11_MAC",      "")   # e.g. 24:41:8C:3C:4B:7D
+    WAKE_TIMEOUT_S = int(os.getenv("MUSCLE_WAKE_TIMEOUT", "90"))  # max wait after WoL
+
     GRPC_PORT = int(os.getenv("SANDBOX_GRPC_PORT", "50055"))
     GRPC_HOST = os.getenv("SANDBOX_GRPC_HOST", "0.0.0.0")
-    
+
     def __init__(self, affect_store: Optional[AffectStore] = None):
         self.ledger: Optional[LedgerStore] = None
         self.muscle_client = None  # gRPC stub to Muscle (set during initialize)
@@ -64,10 +87,66 @@ class SandboxService:
         await self.ledger.connect()
         
         logger.info(f"Sandbox connecting to Muscle at {self.MUSCLE_HOST}:{self.MUSCLE_PORT}")
-        # mTLS channel to Muscle — stubs init here in production
-        # self.muscle_client = muscle_pb2_grpc.MuscleStub(channel)
-        
+        self.muscle_client = await self._connect_muscle()
+
         logger.info("Sandbox Service initialized successfully")
+
+    def _build_muscle_channel(self) -> grpc.Channel:
+        """Build mTLS channel to Muscle."""
+        with open(self.CERT_FILE, "rb") as f: cert = f.read()
+        with open(self.KEY_FILE,  "rb") as f: key  = f.read()
+        with open(self.MUSCLE_CA_CERT, "rb") as f: ca = f.read()
+        creds = grpc.ssl_channel_credentials(
+            root_certificates=ca, private_key=key, certificate_chain=cert
+        )
+        return grpc.secure_channel(
+            f"{self.MUSCLE_HOST}:{self.MUSCLE_PORT}",
+            creds,
+            options=[("grpc.ssl_target_name_override", self.MUSCLE_TLS_SN)],
+        )
+
+    async def _probe_muscle(self, stub: muscle_pb2_grpc.MuscleStub) -> bool:
+        """Return True if Muscle responds to a health check."""
+        try:
+            r = stub.Health(muscle_pb2.HealthRequest(session_id="sandbox-probe"), timeout=4)
+            return r.healthy
+        except Exception:
+            return False
+
+    async def _connect_muscle(self) -> Optional[muscle_pb2_grpc.MuscleStub]:
+        """Build Muscle stub, sending WoL then waiting if host is not yet reachable."""
+        try:
+            ch   = self._build_muscle_channel()
+            stub = muscle_pb2_grpc.MuscleStub(ch)
+            if await self._probe_muscle(stub):
+                logger.info("[sandbox] Muscle ready")
+                return stub
+
+            # Not reachable — try to wake if we have a MAC
+            if self.WIN11_MAC:
+                logger.info("[sandbox] Muscle unreachable — sending WoL, waiting up to "
+                            f"{self.WAKE_TIMEOUT_S}s")
+                _send_wol(self.WIN11_MAC)
+                deadline = time.monotonic() + self.WAKE_TIMEOUT_S
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(5)
+                    ch   = self._build_muscle_channel()
+                    stub = muscle_pb2_grpc.MuscleStub(ch)
+                    if await self._probe_muscle(stub):
+                        logger.info("[sandbox] Muscle came online after WoL")
+                        return stub
+                logger.warning("[sandbox] Muscle did not respond within wake timeout — "
+                               "continuing without Muscle (dry-run mode)")
+            else:
+                logger.warning("[sandbox] Muscle unreachable and WIN11_MAC not set — "
+                               "continuing in dry-run mode")
+            return None
+        except FileNotFoundError as e:
+            logger.warning(f"[sandbox] Muscle cert missing ({e}) — dry-run mode")
+            return None
+        except Exception as e:
+            logger.warning(f"[sandbox] Muscle connect failed ({e}) — dry-run mode")
+            return None
     
     async def shutdown(self):
         """Graceful shutdown"""

@@ -236,9 +236,16 @@ services:
       SANDBOX_DB_PASSWORD: ${SANDBOX_DB_PASSWORD}
       MUSCLE_HOST: ${MUSCLE_HOST}
       MUSCLE_PORT: 50051
+      MUSCLE_TLS_SERVER_NAME: win11-muscle
+      CERT_FILE: /run/certs/client.crt
+      KEY_FILE: /run/certs/client.key
+      MUSCLE_CA_CERT: /run/certs/muscle.crt
+      WIN11_MAC: ${WIN11_MAC:-}       # Wake-on-LAN MAC for auto-wake before inference
       SANDBOX_GRPC_PORT: 50055
       SANDBOX_GRPC_HOST: 0.0.0.0
       LOG_LEVEL: INFO
+    volumes:
+      - /opt/teammate-vault/certs:/run/certs:ro
     ports:
       - "50055:50055"
     networks:
