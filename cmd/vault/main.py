@@ -17,6 +17,7 @@ from internal.core.risk.classifier import RiskClassifier, Tier
 from internal.memory.ledger.store import LedgerStore
 from internal.memory.context.manager import ContextManager
 from internal.memory.graph.client import GraphRAGClient
+from internal.memory.vector.client import VectorClient
 from internal.mcp.client import MCPContextProvider
 from internal.git.identity import GitIdentity
 from internal.git.github_client import GitHubClient
@@ -53,6 +54,7 @@ class VaultService:
         self.classifier = RiskClassifier()
         self.ledger: Optional[LedgerStore] = None
         self.context: Optional[ContextManager] = None
+        self.vector_client: Optional[VectorClient] = None
         self.graph_client: Optional[GraphRAGClient] = None
         self._mcp_provider: Optional[MCPContextProvider] = None
         self._lg_vault: Optional[LangGraphVault] = None
@@ -79,8 +81,18 @@ class VaultService:
         )
         await self.context.connect()
 
+        # Vector memory — also injected into GraphRAGClient for hybrid semantic lookup
+        self.vector_client = VectorClient(
+            db_host=self.DB_HOST,
+            db_port=self.DB_PORT,
+            db_name=self.DB_NAME,
+            db_user=self.DB_USER,
+            db_password=self.DB_PASSWORD,
+        )
+        await self.vector_client.connect()
+
         # Neo4j graph memory
-        self.graph_client = GraphRAGClient()
+        self.graph_client = GraphRAGClient(vector_client=self.vector_client)
         await self.graph_client.initialize()
 
         # MCP context provider — the Thalamus (peripheral sensory routing)
@@ -130,6 +142,8 @@ class VaultService:
             await self.ledger.disconnect()
         if self.context:
             await self.context.disconnect()
+        if self.vector_client:
+            await self.vector_client.disconnect()
         logger.info("Vault Service shut down")
 
     async def process_request(

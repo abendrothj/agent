@@ -66,7 +66,8 @@ class WatchdogService:
         await self.vector_client.connect()
 
         # Neo4j graph memory — failures become traversable graph entities
-        self.graph_client = GraphRAGClient()
+        # vector_client injected so find_failure_patterns uses semantic lookup
+        self.graph_client = GraphRAGClient(vector_client=self.vector_client)
         await self.graph_client.initialize()
 
         self.running = True

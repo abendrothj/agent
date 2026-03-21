@@ -8,10 +8,16 @@ failure patterns before every T3/T4 approval.
 Nodes: Document, Entity (file/function/PR/failure/deployment)
 Relationships: CAUSED, FIXED, MODIFIED, INTRODUCED, APPROVED, REJECTED
 """
+import hashlib
 import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+try:
+    from internal.memory.vector.client import VectorClient
+except ImportError:
+    VectorClient = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +65,11 @@ class GraphRAGClient:
     def __init__(
         self,
         index_dir: Optional[str] = None,
+        vector_client: Optional["VectorClient"] = None,
     ):
         self._neo4j_driver = None
         self._neo4j_available = False
+        self._vector_client = vector_client
 
     async def initialize(self):
         """Connect to Neo4j."""
@@ -147,6 +155,53 @@ class GraphRAGClient:
             logger.warning(f"Neo4j query failed: {exc}")
             return []
 
+    @staticmethod
+    def _text_to_embedding(text: str, dim: int = 1024) -> List[float]:
+        """
+        Deterministic sparse embedding via character n-gram hashing.
+        Matches the same function in WatchdogService so vectors written there
+        are comparable to queries generated here.
+        """
+        vec = [0.0] * dim
+        words = text.lower().split()
+        for i, word in enumerate(words):
+            h = int(hashlib.md5(f"{i}:{word}".encode()).hexdigest(), 16)
+            idx = h % dim
+            vec[idx] += 1.0
+        norm = sum(v * v for v in vec) ** 0.5
+        if norm > 0.0:
+            vec = [v / norm for v in vec]
+        return vec
+
+    async def _semantic_doc_ids(self, prompt: str, top_k: int = 20) -> List[str]:
+        """
+        Phase-1 of hybrid lookup: find the top-K most similar retrospective
+        doc_ids in pgvector, using the same hash embedding as Watchdog writes.
+
+        Returns a list of request_id strings that can be used as doc_id filters
+        in subsequent Neo4j Cypher queries.  Falls back to [] if VectorClient
+        is unavailable.
+        """
+        if self._vector_client is None:
+            return []
+        try:
+            embedding = self._text_to_embedding(prompt)
+            entries = await self._vector_client.semantic_search(
+                query_embedding=embedding,
+                limit=top_k,
+                source_type_filter="failure_retrospective",
+            )
+            doc_ids = [
+                e.metadata.get("request_id")
+                for e in entries
+                if e.metadata.get("request_id")
+            ]
+            logger.debug(f"[graph_semantic] pgvector returned {len(doc_ids)} candidate doc_ids")
+            return doc_ids
+        except Exception as exc:
+            logger.warning(f"[graph_semantic] pgvector lookup failed (non-fatal): {exc}")
+            return []
+
     async def find_failure_patterns(
         self,
         prompt: str,
@@ -154,24 +209,47 @@ class GraphRAGClient:
     ) -> Optional[str]:
         """
         Query Neo4j for past failures related to this request.
+
+        Two-phase hybrid lookup:
+          1. pgvector cosine search → candidate doc_ids (retrospective entries
+             written by Watchdog using the same hash embedding)
+          2. Neo4j graph traversal filtered to those doc_ids
+
+        Falls back to keyword CONTAINS if VectorClient is not wired in.
         Returns a warning string if risky patterns found, None if clean.
-        Used by the Vault graph's query_graph_memory node.
         """
         if not self._neo4j_available:
             return None
 
-        rows = await self.neo4j_query(
-            """
-            MATCH (d:Document)-[:CAUSED|TRIGGERED|RELATED_TO]->(f:Entity)
-            WHERE f.type IN ['failure', 'rollback', 'rejected']
-              AND (toLower(d.text) CONTAINS toLower($kw)
-                   OR toLower(f.description) CONTAINS toLower($kw))
-            RETURN d.doc_id AS id, d.source_type AS src,
-                   f.name AS failure_name, f.description AS desc
-            LIMIT 5
-            """,
-            {"kw": prompt[:200]},
-        )
+        doc_ids = await self._semantic_doc_ids(prompt)
+
+        if doc_ids:
+            rows = await self.neo4j_query(
+                """
+                MATCH (d:Document)-[:CAUSED|TRIGGERED|RELATED_TO]->(f:Entity)
+                WHERE d.doc_id IN $doc_ids
+                  AND f.type IN ['failure', 'rollback', 'rejected']
+                RETURN d.doc_id AS id, d.source_type AS src,
+                       f.name AS failure_name, f.description AS desc
+                LIMIT 5
+                """,
+                {"doc_ids": doc_ids},
+            )
+        else:
+            # Fallback: keyword scan when VectorClient is unavailable
+            rows = await self.neo4j_query(
+                """
+                MATCH (d:Document)-[:CAUSED|TRIGGERED|RELATED_TO]->(f:Entity)
+                WHERE f.type IN ['failure', 'rollback', 'rejected']
+                  AND (toLower(d.text) CONTAINS toLower($kw)
+                       OR toLower(f.description) CONTAINS toLower($kw))
+                RETURN d.doc_id AS id, d.source_type AS src,
+                       f.name AS failure_name, f.description AS desc
+                LIMIT 5
+                """,
+                {"kw": prompt[:200]},
+            )
+
         if rows:
             summary = "; ".join(
                 f"{r.get('src','unknown')} → {r.get('failure_name','?')}"
@@ -189,21 +267,42 @@ class GraphRAGClient:
     ) -> bool:
         """
         Query Neo4j: has this type of change been safely baselined before?
-        Returns True if ≥1 successful similar operation found with no associated failure nodes.
+
+        Two-phase hybrid lookup:
+          1. pgvector cosine search → candidate doc_ids
+          2. Neo4j check that ≥1 of those docs has an APPROVED edge and no
+             failure edges
+
+        Falls back to keyword CONTAINS if VectorClient is not wired in.
+        Returns True if ≥1 successful similar operation found.
         """
         if not self._neo4j_available:
             return False
 
-        rows = await self.neo4j_query(
-            """
-            MATCH (d:Document)-[:APPROVED]->(e:Entity)
-            WHERE NOT (d)-[:CAUSED|TRIGGERED]->(:Entity {type: 'failure'})
-              AND (toLower(d.text) CONTAINS toLower($kw)
-                   OR toLower(e.description) CONTAINS toLower($kw))
-            RETURN count(d) AS successes
-            """,
-            {"kw": prompt[:200]},
-        )
+        doc_ids = await self._semantic_doc_ids(prompt)
+
+        if doc_ids:
+            rows = await self.neo4j_query(
+                """
+                MATCH (d:Document)-[:APPROVED]->(e:Entity)
+                WHERE d.doc_id IN $doc_ids
+                  AND NOT (d)-[:CAUSED|TRIGGERED]->(:Entity {type: 'failure'})
+                RETURN count(d) AS successes
+                """,
+                {"doc_ids": doc_ids},
+            )
+        else:
+            rows = await self.neo4j_query(
+                """
+                MATCH (d:Document)-[:APPROVED]->(e:Entity)
+                WHERE NOT (d)-[:CAUSED|TRIGGERED]->(:Entity {type: 'failure'})
+                  AND (toLower(d.text) CONTAINS toLower($kw)
+                       OR toLower(e.description) CONTAINS toLower($kw))
+                RETURN count(d) AS successes
+                """,
+                {"kw": prompt[:200]},
+            )
+
         successes = rows[0].get("successes", 0) if rows else 0
         eligible = successes >= 1
         logger.info(f"[graph_baseline] tier={tier} successes={successes} eligible={eligible}")
