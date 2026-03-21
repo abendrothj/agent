@@ -2,11 +2,10 @@
 Autonomy Loop — the agent's unsupervised contribution drive.
 
 Runs as a background asyncio task inside the Vault container.
-It is NOT triggered by human prompts. It wakes on its own schedule,
-decides what to work on (via RepoSelector), executes the work through
-git operations, submits PRs, and learns from outcomes.
+It is NOT triggered by human prompts — it wakes on its own schedule,
+driven by its affect state (boredom, curiosity, fulfillment).
 
-This is what makes the system genuinely self-directed:
+What makes this genuinely self-directed:
   - The agent chooses its own targets
   - The agent modifies its own codebase when it detects improvement opportunities
   - Every PR outcome (merged/closed) feeds back into Neo4j, improving future decisions
@@ -19,34 +18,86 @@ Architecture note:
   limiting, and human-interrupt nodes that govern human prompts also
   govern the agent's autonomous work. The agent cannot bypass its own
   governance system.
+
+Task queue and sleep/wake model (endocrine analog):
+  The loop runs a priority queue of AutonomyTask objects.  When the queue
+  drains it enters a hormonally-gated sleep: the duration is computed from
+  the current affect state (boredom + curiosity = wake pressure; fulfillment
+  = rest signal).  External callers (API, Slack, Watchdog) can push tasks
+  and wake the loop immediately via enqueue().
 """
 import asyncio
+import heapq
 import logging
 import os
 import subprocess
 import tempfile
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 from internal.affect import engine as affect_engine
 from internal.affect.store import AffectStore
-from internal.git.github_client import GitHubClient, PRInfo
-from internal.git.identity import GitIdentity
-from internal.git.repo_selector import ContributionTarget, RepoSelector
-from internal.memory.graph.client import GraphRAGClient
+
+try:
+    from internal.git.github_client import GitHubClient, PRInfo
+    from internal.git.identity import GitIdentity
+    from internal.git.repo_selector import ContributionTarget, RepoSelector
+    from internal.memory.graph.client import GraphRAGClient
+    _GIT_OK = True
+except ImportError:
+    _GIT_OK = False
+    # Stub types so the class definition compiles without the optional deps.
+    class GitHubClient:  # type: ignore[no-redef]
+        ...
+    class PRInfo:  # type: ignore[no-redef]
+        ...
+    class GitIdentity:  # type: ignore[no-redef]
+        ...
+    class ContributionTarget:  # type: ignore[no-redef]
+        ...
+    class RepoSelector:  # type: ignore[no-redef]
+        def __init__(self, *a, **kw): ...
+    class GraphRAGClient:  # type: ignore[no-redef]
+        ...
 
 logger = logging.getLogger(__name__)
 
-# How often the autonomy loop wakes up (seconds).  2h default.
-LOOP_INTERVAL_SECONDS = int(os.getenv("AUTONOMY_INTERVAL_SECONDS", str(2 * 60 * 60)))
-
-# Minimum interval between contributions (prevents spam PRs)
+# Minimum interval between contributions (prevents spam PRs).
 MIN_CONTRIBUTION_GAP  = int(os.getenv("AUTONOMY_MIN_GAP_SECONDS", str(30 * 60)))
 
-# How often to run affect decay (seconds).  30min default.
+# How often to run affect decay (seconds — 30 min default).
 DECAY_INTERVAL_SECONDS = int(os.getenv("AFFECT_DECAY_INTERVAL_SECONDS", str(30 * 60)))
+
+# Fallback sleep duration when the affect store is unavailable.
+_FALLBACK_SLEEP_SECONDS = int(os.getenv("AUTONOMY_INTERVAL_SECONDS", str(2 * 60 * 60)))
+
+
+# ── Task queue types ──────────────────────────────────────────────────────────
+
+class TaskKind(str, Enum):
+    POLL_OUTCOMES  = "poll_outcomes"   # check open PRs against GitHub
+    CONTRIBUTE     = "contribute"      # find a target and submit a PR
+    EXTERNAL       = "external"        # task injected by API / Slack / Watchdog
+
+
+@dataclass(order=True)
+class AutonomyTask:
+    """
+    A unit of scheduled autonomy work.
+
+    Priority: lower runs first.
+      0  — urgent (human-injected, Watchdog alert)
+      5  — normal (standard cycle tasks)
+      10 — background (deferred housekeeping)
+    """
+    priority:   int      = field(default=5)
+    kind:       TaskKind = field(compare=False, default=TaskKind.CONTRIBUTE)
+    payload:    dict     = field(compare=False, default_factory=dict)
+    created_at: datetime = field(compare=False, default_factory=datetime.utcnow)
 
 
 class AutonomyLoop:
@@ -54,13 +105,14 @@ class AutonomyLoop:
     Background task that drives the agent's autonomous contribution cycle.
 
     Lifecycle:
-      1. start() — launches the loop as a detached asyncio task
-      2. Every LOOP_INTERVAL_SECONDS:
-         a. poll_pr_outcomes() — check outstanding PRs, record results to Neo4j
-         b. find() target via RepoSelector
-         c. execute() — clone, branch, send prompt through Vault pipeline, push
-         d. submit_pr() — open PR on GitHub, record to Neo4j
-      3. stop() — graceful shutdown (waits for current cycle)
+      1. start()     — launches the queue loop and affect decay as asyncio tasks
+      2. enqueue()   — push an external task and wake the loop immediately
+      3. Every sleep/wake cycle:
+           a. Drain the queue (poll PR outcomes, find target, contribute)
+           b. Compute affect-driven sleep duration
+           c. Sleep (interruptible by enqueue())
+           d. Reseed the queue for the next cycle
+      4. stop()      — graceful shutdown
     """
 
     def __init__(
@@ -78,30 +130,38 @@ class AutonomyLoop:
         self._affect   = affect_store
         self._selector = RepoSelector(graph_client, github_client, affect_store)
 
-        self._task: Optional[asyncio.Task] = None
+        self._queue: list[AutonomyTask] = []              # min-heap
+        self._wake_event: Optional[asyncio.Event] = None  # created in start()
+
+        self._loop_task:  Optional[asyncio.Task] = None
         self._decay_task: Optional[asyncio.Task] = None
         self._running = False
         self._last_contribution: Optional[datetime] = None
-        self._last_decay: Optional[datetime] = None
+        self._last_decay:        Optional[datetime] = None
         self._had_novel_activity_since_decay = False
 
-    # ── Lifecycle ────────────────────────────────────────────────────────────
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self):
-        """Launch the autonomy loop and decay loop as background asyncio tasks."""
-        if self._task and not self._task.done():
+        """Launch the autonomy loop and affect decay as background asyncio tasks."""
+        if self._loop_task and not self._loop_task.done():
             return
-        self._running = True
-        self._task = asyncio.create_task(self._loop(), name="autonomy_loop")
-        self._decay_task = asyncio.create_task(self._decay_loop(), name="affect_decay")
+        self._wake_event = asyncio.Event()
+        self._running    = True
+        self._reseed_queue()  # seed initial cycle tasks
+        self._loop_task  = asyncio.create_task(self._loop(),        name="autonomy_loop")
+        self._decay_task = asyncio.create_task(self._decay_loop(),  name="affect_decay")
         logger.info(
-            f"[autonomy] Loop started — interval={LOOP_INTERVAL_SECONDS}s, "
+            "[autonomy] Loop started — task queue active, "
             f"decay every {DECAY_INTERVAL_SECONDS}s"
         )
 
     async def stop(self):
+        """Graceful shutdown — cancels background tasks and waits."""
         self._running = False
-        for t in (self._task, self._decay_task):
+        if self._wake_event:
+            self._wake_event.set()   # unblock any sleeping wait
+        for t in (self._loop_task, self._decay_task):
             if t:
                 t.cancel()
                 try:
@@ -110,19 +170,64 @@ class AutonomyLoop:
                     pass
         logger.info("[autonomy] Loop stopped")
 
-    # ── Main loop ────────────────────────────────────────────────────────────
+    def enqueue(
+        self,
+        kind: TaskKind = TaskKind.EXTERNAL,
+        payload: Optional[dict] = None,
+        priority: int = 0,
+    ) -> None:
+        """
+        Push a task into the queue and wake the loop immediately if sleeping.
+
+        Used by: API handlers, Slack command callbacks, Watchdog alerts.
+        External tasks default to priority=0 (urgent) so they run before the
+        next scheduled cycle.
+        """
+        heapq.heappush(self._queue, AutonomyTask(
+            priority=priority,
+            kind=kind,
+            payload=payload or {},
+        ))
+        if self._wake_event:
+            self._wake_event.set()
+        logger.info(f"[autonomy] Task enqueued: kind={kind} priority={priority}")
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def _loop(self):
+        """
+        Task queue executor with affect-driven sleep.
+
+        Wakes when:
+          - A task is in the queue (including freshly enqueued external tasks)
+          - The affect-computed sleep interval expires
+
+        Sleeps when:
+          - The queue is empty; duration = sleep_duration(affect_state)
+        """
         while self._running:
-            try:
-                await self._cycle()
-            except Exception as exc:
-                logger.error(f"[autonomy] Unhandled error in cycle: {exc}", exc_info=True)
-            await asyncio.sleep(LOOP_INTERVAL_SECONDS)
+            if self._queue:
+                task = heapq.heappop(self._queue)
+                try:
+                    await self._run_task(task)
+                except Exception as exc:
+                    logger.error(
+                        f"[autonomy] Task {task.kind} failed: {exc}", exc_info=True
+                    )
+            else:
+                # Queue empty — sleep until affect says it's time to act
+                sleep_secs = await self._compute_sleep_duration()
+                logger.info(
+                    f"[autonomy] Queue empty — sleeping {sleep_secs / 60:.1f} min "
+                    f"(affect-driven)"
+                )
+                await self._sleep_or_wake(sleep_secs)
+                if self._running:
+                    self._reseed_queue()
 
     async def _decay_loop(self):
         """Separate loop that runs affect decay on its own cadence."""
-        await asyncio.sleep(DECAY_INTERVAL_SECONDS)   # first decay after one interval
+        await asyncio.sleep(DECAY_INTERVAL_SECONDS)
         while self._running:
             try:
                 if self._affect:
@@ -137,36 +242,116 @@ class AutonomyLoop:
                     )
                     self._last_decay = now
                     self._had_novel_activity_since_decay = False
-                    # Log current state
                     state = await self._affect.read_state()
                     if state:
+                        next_wake = await self._compute_sleep_duration()
                         logger.info(
-                            f"[affect] state after decay — "
+                            f"[affect] decay — "
                             f"curiosity={state.curiosity:.3f}  "
                             f"boredom={state.boredom:.3f}  "
-                            f"fulfillment={state.fulfillment:.3f}"
+                            f"fulfillment={state.fulfillment:.3f}  "
+                            f"caution={state.caution:.3f}  "
+                            f"→ next wake in {next_wake / 60:.1f} min"
                         )
             except Exception as exc:
                 logger.warning(f"[affect] decay error (non-fatal): {exc}")
             await asyncio.sleep(DECAY_INTERVAL_SECONDS)
 
-    async def _cycle(self):
+    # ── Task dispatcher ────────────────────────────────────────────────────────
+
+    async def _run_task(self, task: AutonomyTask) -> None:
+        """Dispatch a task to the appropriate handler."""
+        logger.info(f"[autonomy] Running task: {task.kind}")
+        if task.kind == TaskKind.POLL_OUTCOMES:
+            await self._poll_pr_outcomes()
+        elif task.kind == TaskKind.CONTRIBUTE:
+            await self._cycle_contribute()
+        elif task.kind == TaskKind.EXTERNAL:
+            await self._handle_external(task.payload)
+        else:
+            logger.warning(f"[autonomy] Unknown task kind: {task.kind}")
+
+    async def _handle_external(self, payload: dict) -> None:
+        """
+        Handle a task injected by an external caller (API, Slack, Watchdog).
+
+        Payload fields:
+          prompt      — the request text (required)
+          request_id  — idempotency key (generated if absent)
+          tier_hint   — suggested risk tier (default 2)
+        """
+        prompt = payload.get("prompt", "")
+        if not prompt:
+            logger.warning("[autonomy] External task had no prompt — skipping")
+            return
+        request_id = payload.get("request_id", str(uuid.uuid4()))
+        try:
+            result = await self._vault.process_autonomous_request(
+                request_id=request_id,
+                prompt=prompt,
+                tier_hint=payload.get("tier_hint", 2),
+            )
+            logger.info(
+                f"[autonomy] External task {request_id} "
+                f"→ approved={result.get('approved')} reason={result.get('reason')}"
+            )
+        except Exception as exc:
+            logger.warning(f"[autonomy] External task {request_id} failed: {exc}")
+
+    # ── Sleep / wake ──────────────────────────────────────────────────────────
+
+    async def _sleep_or_wake(self, seconds: float) -> None:
+        """
+        Sleep for `seconds`, but wake immediately if a task is enqueued.
+
+        This is the hormonal gate: instead of a fixed cron interval the loop
+        waits a duration shaped by the affect state.  Any call to enqueue()
+        sets the wake event and interrupts the sleep.
+        """
+        if not self._wake_event:
+            await asyncio.sleep(seconds)
+            return
+        self._wake_event.clear()
+        try:
+            await asyncio.wait_for(self._wake_event.wait(), timeout=seconds)
+            logger.info("[autonomy] Woke early — external stimulus")
+        except asyncio.TimeoutError:
+            pass  # natural wake after interval
+
+    async def _compute_sleep_duration(self) -> float:
+        """
+        Read affect state and compute the next sleep duration via the engine.
+        Falls back to _FALLBACK_SLEEP_SECONDS when the store is unavailable.
+        """
+        if not self._affect:
+            return float(_FALLBACK_SLEEP_SECONDS)
+        state = await self._affect.read_state()
+        if state is None:
+            return float(_FALLBACK_SLEEP_SECONDS)
+        return affect_engine.sleep_duration(state)
+
+    def _reseed_queue(self) -> None:
+        """Schedule the standard next-cycle tasks after waking."""
+        heapq.heappush(self._queue, AutonomyTask(priority=5, kind=TaskKind.POLL_OUTCOMES))
+        heapq.heappush(self._queue, AutonomyTask(priority=5, kind=TaskKind.CONTRIBUTE))
+
+    # ── Core cycle ────────────────────────────────────────────────────────────
+
+    async def _cycle_contribute(self):
+        """Find a target and contribute — the core autonomous work task."""
         logger.info("[autonomy] Starting contribution cycle")
 
-        # Step 1 — learn from outstanding PR outcomes
-        await self._poll_pr_outcomes()
-
-        # Step 2 — enforce minimum gap between contributions
+        # Enforce minimum gap between contributions
         if self._last_contribution:
             elapsed = (datetime.utcnow() - self._last_contribution).total_seconds()
             if elapsed < MIN_CONTRIBUTION_GAP:
                 logger.info(
-                    f"[autonomy] Skipping contribution — last one was {elapsed:.0f}s ago "
-                    f"(min gap {MIN_CONTRIBUTION_GAP}s)"
+                    f"[autonomy] Skipping contribution — last one was "
+                    f"{elapsed:.0f}s ago (min gap {MIN_CONTRIBUTION_GAP}s)"
                 )
                 return
 
-        # Step 3 — decide what to work on
+        # Decide what to work on
         target = await self._selector.find_next_target()
         if not target:
             logger.info("[autonomy] No suitable target found this cycle")
@@ -174,7 +359,6 @@ class AutonomyLoop:
                 await self._affect.apply_delta(affect_engine.cycle_no_target())
             return
 
-        # Step 4 — execute and submit PR
         await self._contribute(target)
 
     # ── PR outcome polling (learning signal) ────────────────────────────────

@@ -20,6 +20,9 @@ from internal.affect.engine import (
     compute_top_p,
     summarise_inference_params,
     score_boost,
+    sleep_duration,
+    SLEEP_MIN_SECONDS,
+    SLEEP_MAX_SECONDS,
     pr_merged,
     pr_rejected,
     pr_stale,
@@ -333,3 +336,38 @@ class TestScoreBoost:
         state = _state(boredom=0.2)
         influence = score_boost(state, "web", "js", 0.5, 5, 2)
         assert influence.boredom_override is False
+
+
+# ── sleep_duration ────────────────────────────────────────────────────────────
+
+class TestSleepDuration:
+    """sleep_duration() maps affect state to a sleep interval in seconds."""
+
+    def test_high_wake_pressure_returns_short_sleep(self):
+        """Max boredom + max curiosity → shortest possible sleep (~15 min)."""
+        state = _state(curiosity=1.0, boredom=1.0, fulfillment=0.0)
+        assert sleep_duration(state) <= 60 * 60  # under 1 hour
+
+    def test_high_fulfilment_returns_long_sleep(self):
+        """Content + low urgency → long sleep approaching 4 hours."""
+        state = _state(curiosity=0.0, boredom=0.0, fulfillment=1.0)
+        assert sleep_duration(state) >= 3 * 60 * 60  # at least 3 hours
+
+    def test_balanced_state_is_intermediate(self):
+        """Resting state (b=0.3, c=0.5, f=0.5) → between 1h and 3.5h."""
+        state = _state(curiosity=0.5, boredom=0.3, fulfillment=0.5)
+        secs = sleep_duration(state)
+        assert 60 * 60 <= secs <= 3.5 * 60 * 60
+
+    def test_result_never_below_minimum(self):
+        state = _state(curiosity=1.0, boredom=1.0, fulfillment=1.0)
+        assert sleep_duration(state) >= SLEEP_MIN_SECONDS
+
+    def test_result_never_above_maximum(self):
+        state = _state(curiosity=0.0, boredom=0.0, fulfillment=0.0)
+        assert sleep_duration(state) <= SLEEP_MAX_SECONDS
+
+    def test_result_is_integer_seconds(self):
+        state = _state(curiosity=0.333, boredom=0.666, fulfillment=0.111)
+        result = sleep_duration(state)
+        assert isinstance(result, int)

@@ -396,3 +396,41 @@ def score_boost(
         boredom_override=boredom_override,
         description=", ".join(desc_parts) if desc_parts else "neutral",
     )
+
+
+# ── Sleep / wake timing ───────────────────────────────────────────────────────
+
+# Hard bounds on the autonomy loop's sleep interval.
+SLEEP_MIN_SECONDS = 15 * 60        # 15 min  (very bored + very curious)
+SLEEP_MAX_SECONDS = 4 * 60 * 60   # 4 hours (content + fulfilled)
+
+
+def sleep_duration(state: AffectState) -> float:
+    """
+    Compute how long the autonomy loop should sleep before its next cycle.
+
+    Endocrine analog — the affect state acts as a hormonal bloodstream that
+    the scheduler reads to decide when to wake:
+
+      Boredom   (adenosine)       — accumulates without novelty; high boredom
+                                    creates sleep pressure that shortens the gap
+      Curiosity (norepinephrine)  — arousal, exploration urgency; high curiosity
+                                    pulls the agent toward action sooner
+      Fulfillment (serotonin)     — contentment rest signal; high fulfillment
+                                    slows urgency and extends the sleep window
+
+    Net wake pressure is the difference between the drive signals and the rest
+    signal.  Maps linearly to [SLEEP_MIN_SECONDS, SLEEP_MAX_SECONDS]:
+
+      wake_pressure ≈ 1.0  →  SLEEP_MIN (15 min)   — restless, driven
+      wake_pressure ≈ 0.0  →  SLEEP_MAX (4 hours)  — content, no urgency
+
+    Balanced resting state (boredom=0.3, curiosity=0.5, fulfillment=0.5):
+      wake_pressure ≈ 0.39  →  ~2.6 hours  (close to the 2h default)
+    """
+    wake_pressure = state.boredom   * 0.55 + state.curiosity  * 0.45
+    rest_signal   = state.fulfillment * 0.30
+    net = max(0.0, min(1.0, wake_pressure - rest_signal))
+
+    duration = SLEEP_MAX_SECONDS - net * (SLEEP_MAX_SECONDS - SLEEP_MIN_SECONDS)
+    return round(duration)

@@ -155,19 +155,32 @@ When adding new components, ask: *what organ does this replace, and does it fit 
 
 ## Autonomy Loop — The Circadian Rhythm
 
-`cmd/vault/autonomy_loop.py` runs independently of the request pipeline, like a biological drive cycle:
+`cmd/vault/autonomy_loop.py` runs independently of the request pipeline.
+It is driven by an **affect-gated task queue**, not a fixed cron interval.
 
 ```
-_loop()            every AUTONOMY_INTERVAL_SECONDS (default 7200)
-  ├─ find_next_target()      hippocampus + affect  → pick a repo
-  ├─ _contribute()           produces a PR, fires affect signals
-  │    ├─ novel?  → curiosity ↑, domain recorded in explored_domains
-  │    └─ familiar? → fulfillment ↑ (mastery) or boredom ↑ (repetition)
-  └─ _poll_pr_outcomes()     reads merged/rejected signals → fulfillment/boredom
+_loop()            priority queue; sleeps when queue is empty
+  ├─ POLL_OUTCOMES (priority 5)
+  │    └─ _poll_pr_outcomes()     check GitHub, record merged/closed → affect
+  ├─ CONTRIBUTE (priority 5)
+  │    ├─ find_next_target()      hippocampus + affect  → pick a repo
+  │    ├─ _contribute()           prompt → Vault pipeline → PR
+  │    │    ├─ novel?  → curiosity ↑, domain recorded in explored_domains
+  │    │    └─ familiar? → fulfillment ↑ (mastery) or boredom ↑ (repetition)
+  │    └─ affect signals fired after each PR outcome
+  └─ EXTERNAL (priority 0 — urgent)
+       └─ _handle_external()      API / Slack / Watchdog-injected prompt
+                                  → vault.process_autonomous_request()
+
+_sleep_or_wake(seconds)           hormonally-gated sleep
+  ├─ duration = affect_engine.sleep_duration(state)   [15 min – 4 hours]
+  └─ interruptible via enqueue() → asyncio.Event wake
 
 _decay_loop()      every 1800 seconds
   └─ apply_decay()  curiosity mean-reverts to 0.5, boredom grows without novelty
 ```
+
+**Wake/sleep logic:**  When the queue drains, the loop calls `_compute_sleep_duration()` which reads the `agent_affect` table and delegates to the endocrine engine.  Any call to `enqueue()` sets a `asyncio.Event` that wakes the loop immediately — so external work always interrupts sleep.
 
 ---
 
@@ -193,6 +206,58 @@ _decay_loop()      every 1800 seconds
 | Tactile | what is being touched | direct file reads | relevant source files named in prompt |
 
 *Planned modalities: fetch (vision — read issue bodies, docs URLs), structured knowledge (semantic memory supplement).*
+
+---
+
+## Endocrine System
+
+The **endocrine system** is the layer that mediates between raw events (a PR merges, a risk tier fires, a cycle finds no target) and the agent's long-running behavioural state.  It is not a single service — it is the *protocol* by which any part of the system can alter the shared hormonal bloodstream.
+
+### Bloodstream
+
+```
+PostgreSQL  agent_affect  table
+  curiosity   NUMERIC(5,3)   — norepinephrine analogue
+  boredom     NUMERIC(5,3)   — adenosine analogue
+  fulfillment NUMERIC(5,3)   — serotonin / dopamine analogue
+  caution     NUMERIC(5,3)   — cortisol analogue
+```
+
+Every service that needs the agent's current disposition reads this table.
+Every service that detects a significant event writes a delta to it.
+
+### Glands → Hormones → Target Organs
+
+| Hormone | Biological role | Agent equivalent | Secreted by | Read by |
+|---|---|---|---|---|
+| **Norepinephrine** | Arousal, alertness, exploration urgency | `curiosity` | `novel_domain_explored`, `cycle_no_target`, `pr_rejected` | Temperature ↑, top_p ↑, sleep shorter |
+| **Adenosine** | Sleep pressure — accumulates without activity | `boredom` | `familiar_domain_again`, `cycle_no_target`, `pr_stale` | Temperature ↑ (restlessness), sleep shorter |
+| **Serotonin / Dopamine** | Contentment and reward | `fulfillment` | `pr_merged`, `cycle_contributed`, `user_slack_approved` | Temperature ↓, sleep longer |
+| **Cortisol** | Stress response, outward-directed concern | `caution` | `signal_caution(tier)` from `node_classify` | Temperature ↓, top_p ↓, narrows output |
+| **Melatonin** | Circadian rhythm, pulls toward resting state | `apply_decay()` | `_decay_loop` (every 30 min) | All four hormones pulled toward baseline |
+| **Adrenaline** | Emergency fight-or-flight | Rate limiter + Watchdog kill-switch | Watchdog container | Sandbox isolation, loop pause |
+| **Insulin / Glucagon** | Metabolic availability | Wake-on-LAN / sleep scripts | OS scheduler on Win11 | GPU availability for Muscle service |
+
+### `sleep_duration()` — the endocrine clock
+
+```
+internal/affect/engine.py :: sleep_duration(state)
+
+  wake_pressure = boredom × 0.55 + curiosity × 0.45   # adenosine + norepinephrine
+  rest_signal   = fulfillment × 0.30                   # serotonin
+  net           = clamp(wake_pressure − rest_signal, 0, 1)
+
+  sleep = SLEEP_MAX − net × (SLEEP_MAX − SLEEP_MIN)
+        = 4h  →  15 min  (linear across [0, 1])
+```
+
+| Affect state | net | Sleep duration |
+|---|---|---|
+| Very bored + very curious (restless) | ~1.0 | 15 min |
+| Balanced resting state | ~0.25 | ~2.6 h |
+| Fulfilled + no urgency (content) | ~0.0 | 4 h |
+
+This connects the endocrine loop end-to-end: events → `agent_affect` table → `sleep_duration()` → autonomy loop wake interval.
 
 ---
 
