@@ -60,6 +60,7 @@ class LedgerStore:
                 f"postgresql://{self.db_user}:{self.db_password}@"
                 f"{self.db_host}:{self.db_port}/{self.db_name}",
                 row_factory=dict_row,
+                autocommit=True,
             )
             logger.info(f"Connected to Ledger store at {self.db_host}:{self.db_port}")
         except Exception as e:
