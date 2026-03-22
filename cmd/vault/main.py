@@ -201,11 +201,16 @@ class VaultService:
         )
 
         if reason.startswith("PENDING_MFA:"):
+            import time as _time
             logger.info(f"[autonomous] MFA required for {request_id} — polling ledger (timeout={self.MFA_TIMEOUT_SECONDS}s)")
-            deadline = _asyncio.get_event_loop().time() + self.MFA_TIMEOUT_SECONDS
-            while _asyncio.get_event_loop().time() < deadline:
+            deadline = _time.monotonic() + self.MFA_TIMEOUT_SECONDS
+            while _time.monotonic() < deadline:
                 await _asyncio.sleep(10)
-                entries = await self.ledger.query_entries(request_id_filter=request_id)
+                try:
+                    entries = await self.ledger.query_entries(request_id_filter=request_id)
+                except Exception as poll_exc:
+                    logger.warning(f"[autonomous] ledger poll error: {poll_exc}")
+                    continue
                 for e in entries:
                     if e.action_type == "approve":
                         logger.info(f"[autonomous] MFA approved {request_id}")
