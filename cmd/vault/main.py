@@ -186,11 +186,11 @@ class VaultService:
         """
         Entry point for the AutonomyLoop.
 
-        Wraps process_request() with autonomy-appropriate defaults and returns
-        a dict so callers can do result.get("approved") / result.get("code_patch").
-        tier_hint is embedded in system_context for classifier context; the
-        LangGraph classifier makes the final tier determination.
+        Wraps process_request() with autonomy-appropriate defaults. If the
+        LangGraph pipeline pauses for human MFA, polls the ledger until the
+        human approves/denies or the MFA timeout elapses.
         """
+        import asyncio as _asyncio
         system_context = f"autonomous_contribution tier_hint={tier_hint}"
         approved, reason, _tier = await self.process_request(
             request_id=request_id,
@@ -199,6 +199,23 @@ class VaultService:
             scope="external",
             session_id=request_id,
         )
+
+        if reason.startswith("PENDING_MFA:"):
+            logger.info(f"[autonomous] MFA required for {request_id} — polling ledger (timeout={self.MFA_TIMEOUT}s)")
+            deadline = _asyncio.get_event_loop().time() + self.MFA_TIMEOUT
+            while _asyncio.get_event_loop().time() < deadline:
+                await _asyncio.sleep(10)
+                entries = await self.ledger.query_entries(request_id_filter=request_id)
+                for e in entries:
+                    if e.action_type == "approve":
+                        logger.info(f"[autonomous] MFA approved {request_id}")
+                        return {"approved": True, "reason": e.details, "code_patch": None}
+                    if e.action_type == "reject":
+                        logger.info(f"[autonomous] MFA rejected {request_id}")
+                        return {"approved": False, "reason": e.details, "code_patch": None}
+            logger.warning(f"[autonomous] MFA timeout for {request_id}")
+            return {"approved": False, "reason": "mfa_timeout", "code_patch": None}
+
         return {"approved": approved, "reason": reason, "code_patch": None}
 
     async def resume_after_mfa(
