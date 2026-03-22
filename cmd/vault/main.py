@@ -177,6 +177,30 @@ class VaultService:
         )
         return approved, reason, Tier(tier_int)
 
+    async def process_autonomous_request(
+        self,
+        request_id: str,
+        prompt: str,
+        tier_hint: int = 2,
+    ) -> dict:
+        """
+        Entry point for the AutonomyLoop.
+
+        Wraps process_request() with autonomy-appropriate defaults and returns
+        a dict so callers can do result.get("approved") / result.get("code_patch").
+        tier_hint is embedded in system_context for classifier context; the
+        LangGraph classifier makes the final tier determination.
+        """
+        system_context = f"autonomous_contribution tier_hint={tier_hint}"
+        approved, reason, _tier = await self.process_request(
+            request_id=request_id,
+            prompt=prompt,
+            system_context=system_context,
+            scope="external",
+            session_id=request_id,
+        )
+        return {"approved": approved, "reason": reason, "code_patch": None}
+
     async def resume_after_mfa(
         self,
         request_id: str,

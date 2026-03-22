@@ -55,6 +55,7 @@ class VectorClient:
                 f"postgresql://{self.db_user}:{self.db_password}@"
                 f"{self.db_host}:{self.db_port}/{self.db_name}",
                 row_factory=dict_row,
+                autocommit=True,
             )
             logger.info(f"Connected to PostgreSQL at {self.db_host}:{self.db_port}")
         except Exception as e:
@@ -121,7 +122,7 @@ class VectorClient:
             
             # Cosine similarity: 1 - (distance / 2) for normalized vectors
             query += """
-                ORDER BY embedding <=> %s ASC
+                ORDER BY embedding <=> %s::vector ASC
                 LIMIT %s
             """
             params.extend([query_embedding, limit])
