@@ -124,7 +124,7 @@ class MuscleClient:
                 action_intent="code_gen",
             )
             tokens: list[str] = []
-            async for resp in stub.GenerateResponse(req):
+            for resp in stub.GenerateResponse(req):
                 if resp.status == "error":
                     logger.error(f"[muscle] inference error: {resp.error_msg}")
                     break
