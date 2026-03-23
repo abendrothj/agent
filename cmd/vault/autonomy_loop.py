@@ -77,6 +77,9 @@ logger = logging.getLogger(__name__)
 # Minimum interval between contributions (prevents spam PRs).
 MIN_CONTRIBUTION_GAP  = int(os.getenv("AUTONOMY_MIN_GAP_SECONDS", str(30 * 60)))
 
+# How long to wait before retrying when Win11 is busy (activity monitor queued).
+MUSCLE_IDLE_POLL_SECONDS = int(os.getenv("MUSCLE_IDLE_POLL_SECONDS", str(5 * 60)))
+
 # How often to run affect decay (seconds — 30 min default).
 DECAY_INTERVAL_SECONDS = int(os.getenv("AFFECT_DECAY_INTERVAL_SECONDS", str(30 * 60)))
 
@@ -474,6 +477,14 @@ class AutonomyLoop:
             system_context="autonomous_contribution code_generation",
             max_tokens=4096,
         )
+        if generated is None:
+            # Win11 is busy — re-enqueue and retry after idle poll interval
+            logger.info(
+                f"[autonomy] Win11 active — retrying in {MUSCLE_IDLE_POLL_SECONDS // 60} min"
+            )
+            await asyncio.sleep(MUSCLE_IDLE_POLL_SECONDS)
+            self.enqueue(kind=TaskKind.CONTRIBUTE, priority=5)
+            return
         if not generated:
             logger.warning("[autonomy] Muscle unreachable or returned no output — skipping")
             return

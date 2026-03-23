@@ -100,10 +100,11 @@ class MuscleClient:
         max_tokens: int = 2048,
         temperature: float = 0.7,
         top_p: float = 0.9,
-    ) -> str:
+    ) -> Optional[str]:
         """
         Stream tokens from Muscle and return the full generated text.
-        Returns an empty string if Muscle is unavailable.
+        Returns None if Win11 is busy (activity monitor queued the request).
+        Returns an empty string if Muscle is unavailable or errored.
         """
         stub = await self._connect()
         if stub is None:
@@ -130,7 +131,7 @@ class MuscleClient:
                     break
                 if resp.status == "queued":
                     logger.warning(f"[muscle] request queued by activity monitor: {resp.error_msg}")
-                    break
+                    return None
                 if resp.token:
                     tokens.append(resp.token)
             result = "".join(tokens)
