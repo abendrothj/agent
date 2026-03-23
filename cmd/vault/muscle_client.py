@@ -53,7 +53,15 @@ class MuscleClient:
     WAKE_TIMEOUT_S = int(os.getenv("MUSCLE_WAKE_TIMEOUT", "120"))
 
     def _send_wol(self) -> None:
-        """Broadcast a Wake-on-LAN magic packet to WIN11_MAC."""
+        """
+        Send a Wake-on-LAN magic packet to Win11.
+
+        Uses unicast UDP to MUSCLE_HOST:9 rather than broadcast — broadcast
+        doesn't cross the WiFi→Ethernet boundary at the AP, but unicast does.
+        A permanent ARP entry for MUSCLE_HOST must exist on the host so the
+        kernel can route the packet without a live ARP response from the
+        sleeping machine (see static-arp.service on the Pi).
+        """
         if not self.WIN11_MAC:
             logger.warning("[muscle] WIN11_MAC not set — cannot send WoL")
             return
@@ -61,10 +69,9 @@ class MuscleClient:
             mac_bytes = bytes.fromhex(self.WIN11_MAC.replace(":", "").replace("-", ""))
             magic = b"\xff" * 6 + mac_bytes * 16
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                s.sendto(magic, ("255.255.255.255", 9))
-                s.sendto(magic, ("10.0.0.255", 9))  # directed subnet broadcast
-            logger.info(f"[muscle] WoL magic packet sent to {self.WIN11_MAC}")
+                # Unicast to the static IP — routes through AP to Win11's Ethernet NIC
+                s.sendto(magic, (self.MUSCLE_HOST, 9))
+            logger.info(f"[muscle] WoL magic packet sent to {self.MUSCLE_HOST} ({self.WIN11_MAC})")
         except Exception as exc:
             logger.warning(f"[muscle] WoL send failed: {exc}")
 
