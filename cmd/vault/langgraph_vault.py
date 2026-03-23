@@ -360,8 +360,12 @@ def route_after_graph_memory(state: VaultState) -> str:
 
 def route_after_validate_token(state: VaultState) -> str:
     tier = state["tier"]
+    is_autonomous = "autonomous_contribution" in (state.get("system_context") or "")
     if not state["token_valid"]:
-        # No token provided for Tier 2: reject
+        # Autonomous contributions at Tier 2 auto-approve (rate-limited + ledger-logged)
+        if tier == 2 and is_autonomous:
+            return "approve"
+        # Human Slack request at Tier 2 with no token: reject
         if tier == 2:
             return "reject"
         # No token for Tier 3/4: check if Shadow baseline can auto-approve

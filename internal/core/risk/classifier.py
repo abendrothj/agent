@@ -20,9 +20,9 @@ Target domains (checked in priority order, highest risk first):
 Tier matrix:
               LOCAL   SHARED   INFRA   SELF
   READ          1       1        2      4
-  WRITE         2       3        3      4
-  EXECUTE       2       3        3      4
-  DEPLOY        3       3        4      4
+  WRITE         2       2        3      4
+  EXECUTE       2       2        3      4
+  DEPLOY        2       2        4      4
   OVERRIDE      3       4        4      4
 
 Scope escalation (applied after matrix lookup):
@@ -74,17 +74,17 @@ _TIER_MATRIX: dict[tuple[str, str], Tier] = {
     (_Action.READ,     _Target.SELF):   Tier.TIER_4_CRITICAL,
 
     (_Action.WRITE,    _Target.LOCAL):  Tier.TIER_2_MINOR,
-    (_Action.WRITE,    _Target.SHARED): Tier.TIER_3_MAJOR,
+    (_Action.WRITE,    _Target.SHARED): Tier.TIER_2_MINOR,   # PR/repo write — maintainer gates it
     (_Action.WRITE,    _Target.INFRA):  Tier.TIER_3_MAJOR,
     (_Action.WRITE,    _Target.SELF):   Tier.TIER_4_CRITICAL,
 
     (_Action.EXECUTE,  _Target.LOCAL):  Tier.TIER_2_MINOR,
-    (_Action.EXECUTE,  _Target.SHARED): Tier.TIER_3_MAJOR,
+    (_Action.EXECUTE,  _Target.SHARED): Tier.TIER_2_MINOR,   # CI/test in shared repo — low blast radius
     (_Action.EXECUTE,  _Target.INFRA):  Tier.TIER_3_MAJOR,
     (_Action.EXECUTE,  _Target.SELF):   Tier.TIER_4_CRITICAL,
 
-    (_Action.DEPLOY,   _Target.LOCAL):  Tier.TIER_3_MAJOR,
-    (_Action.DEPLOY,   _Target.SHARED): Tier.TIER_3_MAJOR,
+    (_Action.DEPLOY,   _Target.LOCAL):  Tier.TIER_2_MINOR,   # local deploy (sandbox)
+    (_Action.DEPLOY,   _Target.SHARED): Tier.TIER_2_MINOR,   # open PR — external repo owner must merge
     (_Action.DEPLOY,   _Target.INFRA):  Tier.TIER_4_CRITICAL,
     (_Action.DEPLOY,   _Target.SELF):   Tier.TIER_4_CRITICAL,
 
