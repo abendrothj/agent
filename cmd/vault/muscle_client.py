@@ -61,24 +61,35 @@ class MuscleClient:
         )
 
     async def _connect(self):
-        """Return a live MuscleStub or None if Muscle is unreachable."""
-        if not _GRPC_OK or not _PROTO_OK:
+        """
+        Return a live MuscleStub or None if Muscle is unreachable.
+        Retries up to 6 times (30s total) to allow for model load time.
+        """
+        if not _GRPC_OK or not _PROTO_OK or muscle_pb2 is None or muscle_pb2_grpc is None:
             logger.warning("[muscle] grpc or proto stubs not available")
             return None
         try:
             ch   = self._build_channel()
             stub = muscle_pb2_grpc.MuscleStub(ch)
-            r    = stub.Health(muscle_pb2.HealthRequest(session_id="vault-probe"), timeout=4)
-            if r.healthy:
-                logger.info("[muscle] Muscle online")
-                return stub
-            logger.warning(f"[muscle] Muscle at {self.MUSCLE_HOST}:{self.MUSCLE_PORT} unhealthy")
+            for attempt in range(6):
+                try:
+                    r = stub.Health(
+                        muscle_pb2.HealthRequest(session_id="vault-probe"), timeout=10
+                    )
+                    if r.healthy:
+                        logger.info(f"[muscle] Muscle online (attempt {attempt + 1})")
+                        return stub
+                    logger.info(f"[muscle] Muscle not ready yet (attempt {attempt + 1}) — waiting")
+                except Exception as exc:
+                    logger.info(f"[muscle] probe {attempt + 1}/6 failed: {exc}")
+                await asyncio.sleep(5)
+            logger.warning(f"[muscle] Muscle at {self.MUSCLE_HOST}:{self.MUSCLE_PORT} did not become healthy")
             return None
         except FileNotFoundError as exc:
             logger.warning(f"[muscle] cert not found ({exc})")
             return None
         except Exception as exc:
-            logger.warning(f"[muscle] unreachable: {exc}")
+            logger.warning(f"[muscle] connect error: {exc}")
             return None
 
     async def generate(
