@@ -475,7 +475,7 @@ class AutonomyLoop:
             max_tokens=4096,
         )
         if not generated:
-            logger.warning("[autonomy] Muscle returned no output (offline or timed out) — skipping")
+            logger.warning("[autonomy] Muscle unreachable or returned no output — skipping")
             return
 
         # Own-project: Muscle output is a series of files; create repo and push

@@ -2,15 +2,13 @@
 MuscleClient — used by the autonomy loop to call the Win11 inference engine.
 
 Handles:
-  - Wake-on-LAN when Win11 is sleeping
   - mTLS gRPC connection to Muscle
   - Streaming token generation
 """
 import asyncio
 import logging
 import os
-import socket
-import time
+import sys
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -23,7 +21,6 @@ except ImportError:
     _GRPC_OK = False
 
 try:
-    import sys
     sys.path.insert(0, "/app/cmd/muscle")
     import muscle_pb2
     import muscle_pb2_grpc
@@ -49,31 +46,6 @@ class MuscleClient:
     CERT_FILE      = os.getenv("CERT_FILE",              "/run/certs/client.crt")
     KEY_FILE       = os.getenv("KEY_FILE",               "/run/certs/client.key")
     MUSCLE_CA_CERT = os.getenv("MUSCLE_CA_CERT",         "/run/certs/muscle.crt")
-    WIN11_MAC      = os.getenv("WIN11_MAC",              "")
-    WAKE_TIMEOUT_S = int(os.getenv("MUSCLE_WAKE_TIMEOUT", "120"))
-
-    def _send_wol(self) -> None:
-        """
-        Send a Wake-on-LAN magic packet to Win11.
-
-        Uses unicast UDP to MUSCLE_HOST:9 rather than broadcast — broadcast
-        doesn't cross the WiFi→Ethernet boundary at the AP, but unicast does.
-        A permanent ARP entry for MUSCLE_HOST must exist on the host so the
-        kernel can route the packet without a live ARP response from the
-        sleeping machine (see static-arp.service on the Pi).
-        """
-        if not self.WIN11_MAC:
-            logger.warning("[muscle] WIN11_MAC not set — cannot send WoL")
-            return
-        try:
-            mac_bytes = bytes.fromhex(self.WIN11_MAC.replace(":", "").replace("-", ""))
-            magic = b"\xff" * 6 + mac_bytes * 16
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                # Unicast to the static IP — routes through AP to Win11's Ethernet NIC
-                s.sendto(magic, (self.MUSCLE_HOST, 9))
-            logger.info(f"[muscle] WoL magic packet sent to {self.MUSCLE_HOST} ({self.WIN11_MAC})")
-        except Exception as exc:
-            logger.warning(f"[muscle] WoL send failed: {exc}")
 
     def _build_channel(self):
         with open(self.CERT_FILE,      "rb") as f: cert = f.read()
@@ -88,54 +60,25 @@ class MuscleClient:
             options=[("grpc.ssl_target_name_override", self.MUSCLE_TLS_SN)],
         )
 
-    async def _probe(self, stub) -> bool:
-        try:
-            r = stub.Health(
-                muscle_pb2.HealthRequest(session_id="vault-probe"), timeout=4
-            )
-            return bool(r.healthy)
-        except Exception:
-            return False
-
     async def _connect(self):
-        """
-        Return a live MuscleStub, sending WoL and waiting if Win11 is asleep.
-        Returns None if Muscle is not reachable after WAKE_TIMEOUT_S seconds.
-        """
+        """Return a live MuscleStub or None if Muscle is unreachable."""
         if not _GRPC_OK or not _PROTO_OK:
-            logger.warning("[muscle] grpc or proto stubs not available — skipping")
+            logger.warning("[muscle] grpc or proto stubs not available")
             return None
         try:
             ch   = self._build_channel()
             stub = muscle_pb2_grpc.MuscleStub(ch)
-            if await self._probe(stub):
-                logger.info("[muscle] Muscle already online")
+            r    = stub.Health(muscle_pb2.HealthRequest(session_id="vault-probe"), timeout=4)
+            if r.healthy:
+                logger.info("[muscle] Muscle online")
                 return stub
-
-            # Not reachable — send WoL and poll
-            logger.info(
-                f"[muscle] Muscle unreachable at {self.MUSCLE_HOST}:{self.MUSCLE_PORT} "
-                f"— sending WoL, waiting up to {self.WAKE_TIMEOUT_S}s"
-            )
-            self._send_wol()
-            deadline = time.monotonic() + self.WAKE_TIMEOUT_S
-            while time.monotonic() < deadline:
-                await asyncio.sleep(5)
-                try:
-                    ch   = self._build_channel()
-                    stub = muscle_pb2_grpc.MuscleStub(ch)
-                    if await self._probe(stub):
-                        logger.info("[muscle] Muscle came online after WoL")
-                        return stub
-                except Exception:
-                    pass
-            logger.warning("[muscle] Muscle did not respond within wake timeout")
+            logger.warning(f"[muscle] Muscle at {self.MUSCLE_HOST}:{self.MUSCLE_PORT} unhealthy")
             return None
         except FileNotFoundError as exc:
-            logger.warning(f"[muscle] cert not found ({exc}) — cannot connect")
+            logger.warning(f"[muscle] cert not found ({exc})")
             return None
         except Exception as exc:
-            logger.warning(f"[muscle] connect error: {exc}")
+            logger.warning(f"[muscle] unreachable: {exc}")
             return None
 
     async def generate(
