@@ -50,6 +50,14 @@ try:
     _GIT_OK = True
 except ImportError:
     _GIT_OK = False
+
+try:
+    from cmd.vault.muscle_client import MuscleClient
+    _MUSCLE_OK = True
+except ImportError:
+    _MUSCLE_OK = False
+    class MuscleClient:  # type: ignore[no-redef]
+        async def generate(self, *a, **kw) -> str: return ""
     # Stub types so the class definition compiles without the optional deps.
     class GitHubClient:  # type: ignore[no-redef]
         ...
@@ -128,6 +136,7 @@ class AutonomyLoop:
         self._identity = identity
         self._vault    = vault_service
         self._affect   = affect_store
+        self._muscle   = MuscleClient()
         self._selector = RepoSelector(graph_client, github_client, affect_store)
 
         self._queue: list[AutonomyTask] = []              # min-heap
@@ -457,12 +466,22 @@ class AutonomyLoop:
             logger.info(f"[autonomy] Vault did not approve — {result.get('reason')}")
             return
 
-        # Own-project: Muscle handles the full build+publish; no local patch needed
+        # Ask Muscle to generate the code (wakes Win11 via WoL if needed)
+        logger.info(f"[autonomy] Requesting code generation from Muscle for {target.repo_full_name}")
+        generated = await self._muscle.generate(
+            session_id=request_id,
+            prompt=target.proposed_prompt,
+            system_context="autonomous_contribution code_generation",
+            max_tokens=4096,
+        )
+        if not generated:
+            logger.warning("[autonomy] Muscle returned no output (offline or timed out) — skipping")
+            return
+
+        # Own-project: Muscle output is a series of files; create repo and push
         if is_own_project:
-            logger.info(
-                f"[autonomy] Own-project task approved — Muscle will design, "
-                f"implement, and push the new repo"
-            )
+            logger.info("[autonomy] Own-project — creating GitHub repo and pushing Muscle output")
+            await self._push_new_project(target, generated, request_id)
             if self._affect:
                 await self._affect.apply_delta(
                     affect_engine.novel_domain_explored("own-project", target.language.lower())
@@ -474,10 +493,10 @@ class AutonomyLoop:
             self._last_contribution = datetime.utcnow()
             return
 
-        # Git operations: clone, branch, apply the generated code, push
-        code_patch = result.get("code_patch", "")
-        if not code_patch:
-            logger.info("[autonomy] Vault approved but returned no code patch — skipping git ops")
+        # External repo: Muscle output is expected to be a unified diff patch
+        code_patch = generated
+        if not code_patch.strip().startswith("diff ") and not code_patch.strip().startswith("---"):
+            logger.warning("[autonomy] Muscle output is not a valid diff — skipping git ops")
             return
 
         pr_info = await self._git_submit(target, code_patch)
@@ -529,6 +548,87 @@ class AutonomyLoop:
 
         self._last_contribution = datetime.utcnow()
         logger.info(f"[autonomy] PR submitted: {pr_info.url}")
+
+    async def _push_new_project(
+        self, target: ContributionTarget, generated: str, request_id: str
+    ) -> None:
+        """
+        Create a new GitHub repo under the agent's account and push the
+        Muscle-generated content as the initial commit.
+
+        Muscle output is expected to contain one or more files separated by
+        a simple header line:  ### filename.ext
+        Files missing that header are written as README.md.
+        """
+        import re as _re
+        github_username = os.getenv("GITHUB_USERNAME", "")
+        if not github_username:
+            logger.warning("[autonomy] GITHUB_USERNAME not set — cannot create repo")
+            return
+
+        # Parse Muscle output into {filename: content} blocks
+        files: dict[str, str] = {}
+        current_name = "README.md"
+        current_lines: list[str] = []
+        for line in generated.splitlines():
+            m = _re.match(r"^###\s+(\S+)", line)
+            if m:
+                if current_lines:
+                    files[current_name] = "\n".join(current_lines).strip()
+                current_name = m.group(1)
+                current_lines = []
+            else:
+                current_lines.append(line)
+        if current_lines:
+            files[current_name] = "\n".join(current_lines).strip()
+
+        if not files:
+            logger.warning("[autonomy] Muscle output had no parseable files — skipping")
+            return
+
+        # Derive a repo name from the target description
+        repo_name = _re.sub(r"[^a-z0-9-]", "-", target.domain.lower())[:40].strip("-") or "new-project"
+        repo_name = f"{repo_name}-{request_id[:6]}"
+
+        with tempfile.TemporaryDirectory() as workdir:
+            try:
+                # Write files
+                for fname, content in files.items():
+                    fpath = Path(workdir) / fname
+                    fpath.parent.mkdir(parents=True, exist_ok=True)
+                    fpath.write_text(content)
+
+                def _git(args: list[str]) -> None:
+                    subprocess.run(["git"] + args, check=True,
+                                   capture_output=True, cwd=workdir)
+
+                _git(["init"])
+                self._identity.configure_repo(workdir)
+                _git(["add", "-A"])
+                _git(["commit", "-m", f"initial: {repo_name} (agent autonomous project)"])
+
+                # Create repo on GitHub then push
+                create_url = f"https://api.github.com/user/repos"
+                import httpx as _httpx
+                token = os.getenv("GITHUB_TOKEN", "")
+                async with _httpx.AsyncClient() as http:
+                    resp = await http.post(
+                        create_url,
+                        json={"name": repo_name, "private": False, "auto_init": False},
+                        headers={"Authorization": f"token {token}",
+                                 "Accept": "application/vnd.github+json"},
+                        timeout=15,
+                    )
+                if resp.status_code not in (201, 422):
+                    logger.warning(f"[autonomy] GitHub repo create failed: {resp.status_code} {resp.text[:120]}")
+                    return
+
+                push_url = f"https://{token}@github.com/{github_username}/{repo_name}.git"
+                _git(["remote", "add", "origin", push_url])
+                _git(["push", "-u", "origin", "HEAD:main"])
+                logger.info(f"[autonomy] New project pushed: github.com/{github_username}/{repo_name}")
+            except Exception as exc:
+                logger.error(f"[autonomy] _push_new_project failed: {exc}")
 
     async def _git_submit(
         self, target: ContributionTarget, code_patch: str

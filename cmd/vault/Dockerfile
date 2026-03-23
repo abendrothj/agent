@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir -r requirements-vault.txt
 # Copy code
 COPY cmd/__init__.py /app/cmd/__init__.py
 COPY cmd/vault /app/cmd/vault
+COPY cmd/muscle/muscle_pb2.py /app/cmd/muscle/muscle_pb2.py
+COPY cmd/muscle/muscle_pb2_grpc.py /app/cmd/muscle/muscle_pb2_grpc.py
+COPY cmd/muscle/__init__.py /app/cmd/muscle/__init__.py
 COPY internal /app/internal
 COPY configs /app/configs
 COPY policies /app/policies
