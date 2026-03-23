@@ -128,6 +128,9 @@ class MuscleClient:
                 if resp.status == "error":
                     logger.error(f"[muscle] inference error: {resp.error_msg}")
                     break
+                if resp.status == "queued":
+                    logger.warning(f"[muscle] request queued by activity monitor: {resp.error_msg}")
+                    break
                 if resp.token:
                     tokens.append(resp.token)
             result = "".join(tokens)
