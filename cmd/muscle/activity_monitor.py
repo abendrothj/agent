@@ -1,9 +1,7 @@
 """
 Activity Monitor for Win11 Muscle Service
-Detects user activity (GPU, keyboard, mouse) to avoid resource contention.
-
-When user is active: requests are queued
-When idle for 5+ min: queued requests are processed
+Gates inference on GPU utilisation only — user can work on low-load tasks
+simultaneously. Requests are queued only when GPU > threshold (e.g. gaming).
 """
 
 import asyncio
@@ -138,20 +136,13 @@ class ActivityMonitor:
         last_input_sec = self.get_last_input_time()
         user_active = last_input_sec < 60  # Recent activity in last 60s
         
-        if user_active or gpu_util > self.gpu_threshold:
-            # User is active - update last activity time
+        # Gate on GPU only — user can work on low-load tasks simultaneously.
+        if gpu_util > self.gpu_threshold:
             self.last_activity_time = current_time
             idle_duration = 0.0
-        else:
-            # Idle - calculate idle duration
-            idle_duration = current_time - self.last_activity_time
-        
-        # Determine idle status
-        if user_active or gpu_util > self.gpu_threshold:
             idle_status = IdleStatus.ACTIVE
-        elif idle_duration < self.idle_threshold:
-            idle_status = IdleStatus.TRANSITIONING
         else:
+            idle_duration = current_time - self.last_activity_time
             idle_status = IdleStatus.IDLE
         
         self.current_status = idle_status
